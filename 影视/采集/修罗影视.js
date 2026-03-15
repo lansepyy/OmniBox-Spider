@@ -2,7 +2,7 @@
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, crypto-js
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/修罗影视.js
 
 /**
@@ -176,6 +176,75 @@ const requestPost = async (url, data, options = {}) => {
     } catch (e) {
         logError("❌ POST请求失败", e);
         return null;
+    }
+};
+
+/**
+ * 通过API进行聚合搜索(验证码失败兜底)
+ */
+const aggregateApiSearch = async (keyword, pg) => {
+    if (!keyword) return { list: [], page: pg, pagecount: pg };
+    try {
+        const searchUrl = `https://www.ymck.pro/API/v2.php?q=${encodeURIComponent(keyword)}&size=50`;
+        const base64Data = await request(searchUrl);
+        if (!base64Data) return { list: [], page: pg, pagecount: pg };
+
+        let decodedStr = "";
+        try {
+            decodedStr = Buffer.from(String(base64Data).trim(), "base64").toString("utf8");
+        } catch (e) {
+            logError("聚合搜索Base64解码失败", e);
+            return { list: [], page: pg, pagecount: pg };
+        }
+
+        let searchResults = [];
+        try {
+            searchResults = JSON.parse(decodedStr) || [];
+        } catch (e) {
+            logError("聚合搜索JSON解析失败", e);
+            return { list: [], page: pg, pagecount: pg };
+        }
+
+        if (!Array.isArray(searchResults)) {
+            logInfo("聚合搜索返回非数组");
+            return { list: [], page: pg, pagecount: pg };
+        }
+
+        const targetSites = ["哔滴影视", "修罗", "修罗影视"];
+        const list = [];
+
+        for (const item of searchResults) {
+            if (!item || typeof item !== "object") continue;
+            const website = item.website || "";
+            if (!targetSites.some((name) => website.includes(name))) continue;
+
+            const url = item.url || "";
+            if (!url) continue;
+
+            let vodId = "";
+            try {
+                const u = new URL(url);
+                vodId = getId(u.pathname);
+            } catch {
+                vodId = getId(url);
+            }
+
+            if (!vodId) continue;
+
+            const tags = Array.isArray(item.tags) ? item.tags.filter(Boolean).join(" ") : "";
+            list.push({
+                vod_id: vodId,
+                vod_name: item.text || keyword,
+                vod_pic: fixImg(item.icon || ""),
+                vod_remarks: tags
+            });
+        }
+
+        logInfo(`🧩 聚合搜索命中: ${list.length}条`);
+        return { list, page: 1, pagecount: list.length, total: list.length};
+    } catch (e) {
+        logError("聚合搜索异常", e);
+        return { list: [], page: pg, pagecount: pg };
     }
 };
 
@@ -715,6 +784,17 @@ async function search(params) {
             logInfo("⚠ 无结果，重新整轮流程");
         }
 
+        // 聚合搜索兜底
+        try {
+            const aggregateResult = await aggregateApiSearch(keyword, pg);
+            if (aggregateResult.list.length > 0) {
+                logInfo("✅ 聚合搜索命中");
+                return aggregateResult;
+            }
+        } catch (e) {
+            logError("聚合搜索异常", e);
+        }
+
         logInfo("❌ 所有流程失败");
         return { list: [] };
     } catch (e) {
@@ -770,7 +850,7 @@ async function parseSearch(html, pg, keyword = "") {
     }
 
     logInfo(`📄 分页识别: 当前=${pg} 最大=${pagecount}`);
-    return { list, page: pg, pagecount };
+    return { list, page: pg, pagecount, total: pagecount };
 }
 
 async function play(params) {

@@ -835,7 +835,7 @@ async function detail(params, context) {
             continue;
           }
 
-          const formattedFileId = fileId ? `${shareURL}|${fileId}` : "";
+          const formattedFileId = fileId ? `${shareURL}|${fileId}|${videoId}` : "";
 
           OmniBox.log("info", formattedFileId)
 
@@ -1096,6 +1096,7 @@ async function play(params, context) {
     }
     const shareURL = parts[0] || "";
     const fileId = parts[1] || "";
+    const videoId = parts[2] || "";
 
     if (!shareURL || !fileId) {
       throw new Error("分享链接或文件ID不能为空");
@@ -1113,7 +1114,7 @@ async function play(params, context) {
       let metadata = await OmniBox.getDriveMetadata(shareURL);
 
       if (metadata && metadata.scrapeData && metadata.videoMappings) {
-        const formattedFileId = fileId ? `${shareURL}|${fileId}` : "";
+        const formattedFileId = fileId ? `${shareURL}|${fileId}|${videoId}` : "";
 
         let matchedMapping = null;
         for (const mapping of metadata.videoMappings) {

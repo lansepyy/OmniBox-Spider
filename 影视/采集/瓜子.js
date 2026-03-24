@@ -1,7 +1,7 @@
 // @name 瓜子APP
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
-// @version 1.0.4
+// @version 1.0.5
 // @dependencies: axios, crypto
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/%E5%BD%B1%E8%A7%86/%E9%87%87%E9%9B%86/%E7%93%9C%E5%AD%90.js
 
@@ -1046,7 +1046,7 @@ async function detail(params) {
                         const mapping = videoMappings.find((m) => m?.fileId === meta.fid);
                         if (mapping?.episodeName) {
                             const oldName = ep.name;
-                            ep.name = mapping.episodeName;
+                            ep.name = mapping.episodeNumber + "." + mapping.episodeName;
                             if (oldName !== ep.name) {
                                 OmniBox.log('info', `[瓜子APP] 应用刮削后源文件名: ${oldName} -> ${ep.name}`);
                             }

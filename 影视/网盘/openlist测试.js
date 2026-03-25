@@ -1,4 +1,4 @@
-// @name OpenList影视库优化版 
+// @name OpenList测试
 const OmniBox = require("omnibox_sdk");
 // @downloadURL https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/main/影视/网盘/openlist测试.js
 

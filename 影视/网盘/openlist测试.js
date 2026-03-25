@@ -2,7 +2,7 @@
 const OmniBox = require("omnibox_sdk");
 // @downloadURL https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/main/影视/网盘/openlist测试.js
 
-// ========================================
+// =======================================
 // 必填配置
 // ==========================================
 const OPENLIST_URL   = "http://192.168.2.31:5255";
@@ -14,10 +14,11 @@ const OPENLIST_TOKEN = "";
 // 如果某个分类未配置，则使用根目录并自动识别
 // ==========================================
 const CATEGORY_PATHS = {
-    fixed_movie: "",   // 电影专用路径，例如："/移动盘/电影"
-    fixed_tv: "",      // 电视剧专用路径，例如："/移动盘/电视剧"
-    fixed_anime: "",   // 动漫专用路径，例如："/移动盘/动漫"
-    fixed_short: ""    // 短剧专用路径，例如："/移动盘/短剧"
+    fixed_movie: "",      // 电影专用路径，例如："/移动盘/电影"
+    fixed_tv: "",         // 电视剧专用路径，例如："/移动盘/电视剧"
+    fixed_anime: "",      // 动漫专用路径，例如："/移动盘/动漫"
+    fixed_short: "",      // 短剧专用路径，例如："/移动盘/短剧"
+    fixed_raw: ""         // 全部文件专用路径，例如："/移动盘/全部文件" 或 "/移动盘"
 };
 
 // 内容根目录（当某个分类没有配置专用路径时，使用此根目录进行自动识别）
@@ -42,7 +43,7 @@ const FIXED_CLASSES = [
     { type_id: "fixed_tv",    type_name: "📺 电视剧", media_type: "tv" },
     { type_id: "fixed_anime", type_name: "🎌 动漫", media_type: "tv" },
     { type_id: "fixed_short", type_name: "📱 短剧", media_type: "tv" },
-    { type_id: "openlist_raw_root", type_name: "📂 全部文件", media_type: "raw" }
+    { type_id: "fixed_raw",   type_name: "📂 全部文件", media_type: "raw" }
 ];
 
 // 获取当前请求的 TMDB API Key（优先使用手动填写的，没填则使用前端下发的）
@@ -142,7 +143,7 @@ function getCategoryScanPath(categoryId) {
         return path;
     }
     // 否则返回根目录
-    OmniBox.log("info", `使用根目录自动识别 [${categoryId}]: ${CONTENT_ROOT}`);
+    OmniBox.log("info", `使用根目录 [${categoryId}]: ${CONTENT_ROOT}`);
     return CONTENT_ROOT;
 }
 
@@ -157,14 +158,22 @@ async function getCategoriesAndMappings(forceRefresh = false) {
         fixed_movie: [],
         fixed_tv: [],
         fixed_anime: [],
-        fixed_short: []
+        fixed_short: [],
+        fixed_raw: []
     };
 
     // 为每个分类确定扫描路径
     for (const category of FIXED_CLASSES) {
-        if (category.type_id === "openlist_raw_root") continue; // 跳过免刮削分类
-        
         const scanPath = getCategoryScanPath(category.type_id);
+        
+        // 如果是"全部文件"分类，直接使用专用路径或根目录，不需要自动识别子文件夹
+        if (category.type_id === "fixed_raw") {
+            if (scanPath) {
+                mappings[category.type_id] = [scanPath];
+                OmniBox.log("info", `[${category.type_name}] 使用路径: ${scanPath}`);
+            }
+            continue;
+        }
         
         // 如果分类有专用路径，直接使用该路径，不需要自动识别
         if (CATEGORY_PATHS[category.type_id] && CATEGORY_PATHS[category.type_id].trim()) {
@@ -567,7 +576,7 @@ async function scanTVShows(path, depth = 0, maxDepth = 5) {
 }
 
 // ===== 扫描免刮削根目录 =====
-async function scanRawCategory(targetPath = CONTENT_ROOT) {
+async function scanRawCategory(targetPath) {
     OmniBox.log("info", `扫描免刮削目录: ${targetPath}`);
     const items = await listDir(targetPath);
     if (!items || items.length === 0) return [];
@@ -581,7 +590,6 @@ async function scanRawCategory(targetPath = CONTENT_ROOT) {
         
         if (isDir || isVideoFile(itemName)) {
             results.push({
-                // 给目录类型拼上前缀，触发前端通过 category 方法重新拉取
                 vod_id:       isDir ? `rawdir#${itemPath}` : itemPath,
                 vod_name:     itemName,
                 display_name: itemName,
@@ -649,8 +657,8 @@ async function scanCategoryWithCache(path, mediaType = "movie", forceRefresh = f
                 items = Object.values(grouped);
             }
         } else if (mediaType === "raw") {
-            const actualPath = path.startsWith("rawdir#") ? path.substring(7) : (path === "openlist_raw_root" ? CONTENT_ROOT : path);
-            items = await scanRawCategory(actualPath);
+            // 免刮削目录直接扫描
+            items = await scanRawCategory(path);
         } else {
             // 电影类型使用通用扫描
             items = await scanDirectoryForMedia(path);
@@ -786,7 +794,7 @@ async function category(params) {
         if (!categoryId) return { page: 1, pagecount: 0, total: 0, list: [] };
 
         let type = "movie";
-        if (categoryId === "openlist_raw_root" || categoryId.startsWith("rawdir#")) {
+        if (categoryId === "fixed_raw" || categoryId.startsWith("rawdir#")) {
             // 用户点击免刮削目录，触发子目录请求
             type = "raw";
         } else {

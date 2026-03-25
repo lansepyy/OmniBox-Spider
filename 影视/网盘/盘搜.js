@@ -1,7 +1,7 @@
 // @name 盘搜
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
-// @version 1.0.2
+// @version 1.2.0
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/盘搜.js
 /**
  * OmniBox 网盘爬虫脚本
@@ -69,8 +69,72 @@ const PANCHECK_PLATFORMS = process.env.PANCHECK_PLATFORMS || "";
 const DRIVE_TYPE_CONFIG = (process.env.DRIVE_TYPE_CONFIG || "quark;uc").split(';').map((t) => t.trim()).filter(Boolean);
 // 线路名称配置: 使用分号分隔，例如 本地代理;服务端代理;直连
 const SOURCE_NAMES_CONFIG = (process.env.SOURCE_NAMES_CONFIG || "本地代理;服务端代理;直连").split(';').map((s) => s.trim()).filter(Boolean);
+// 详情页播放线路的网盘排序顺序，仅作用于 detail() 返回的播放线路
+const DRIVE_ORDER = (process.env.DRIVE_ORDER || "baidu;tianyi;quark;uc;115;xunlei;ali;123pan").split(';').map((s) => s.trim().toLowerCase()).filter(Boolean);
 
 // ==================== 配置区域结束 ====================
+
+function inferDriveTypeFromSourceName(name = "") {
+  const raw = String(name || "").toLowerCase();
+  if (raw.includes("百度")) return "baidu";
+  if (raw.includes("天翼")) return "tianyi";
+  if (raw.includes("夸克")) return "quark";
+  if (raw === "uc" || raw.includes("uc")) return "uc";
+  if (raw.includes("115")) return "115";
+  if (raw.includes("迅雷")) return "xunlei";
+  if (raw.includes("阿里")) return "ali";
+  if (raw.includes("123")) return "123pan";
+  return raw;
+}
+
+function sortPlaySourcesByDriveOrder(playSources = []) {
+  if (!Array.isArray(playSources) || playSources.length <= 1 || DRIVE_ORDER.length === 0) {
+    return playSources;
+  }
+
+  const orderMap = new Map(DRIVE_ORDER.map((name, index) => [name, index]));
+  return [...playSources].sort((a, b) => {
+    const aType = inferDriveTypeFromSourceName(a?.name || "");
+    const bType = inferDriveTypeFromSourceName(b?.name || "");
+    const aOrder = orderMap.has(aType) ? orderMap.get(aType) : Number.MAX_SAFE_INTEGER;
+    const bOrder = orderMap.has(bType) ? orderMap.get(bType) : Number.MAX_SAFE_INTEGER;
+    if (aOrder !== bOrder) {
+      return aOrder - bOrder;
+    }
+    return 0;
+  });
+}
+
+function inferDriveTypeFromResult(item = {}) {
+  const rawType = String(item.type_id || item.type_name || item.vod_remarks || "").toLowerCase();
+  if (rawType.includes("aliyun") || rawType.includes("阿里")) return "ali";
+  if (rawType.includes("baidu") || rawType.includes("百度")) return "baidu";
+  if (rawType.includes("tianyi") || rawType.includes("天翼")) return "tianyi";
+  if (rawType.includes("quark") || rawType.includes("夸克")) return "quark";
+  if (rawType === "uc" || rawType.includes("uc")) return "uc";
+  if (rawType.includes("115")) return "115";
+  if (rawType.includes("xunlei") || rawType.includes("迅雷")) return "xunlei";
+  if (rawType.includes("123pan") || rawType === "123" || rawType.includes("123")) return "123pan";
+  return rawType;
+}
+
+function sortResultsByDriveOrder(results = []) {
+  if (!Array.isArray(results) || results.length <= 1 || DRIVE_ORDER.length === 0) {
+    return results;
+  }
+
+  const orderMap = new Map(DRIVE_ORDER.map((name, index) => [name, index]));
+  return [...results].sort((a, b) => {
+    const aType = inferDriveTypeFromResult(a);
+    const bType = inferDriveTypeFromResult(b);
+    const aOrder = orderMap.has(aType) ? orderMap.get(aType) : Number.MAX_SAFE_INTEGER;
+    const bOrder = orderMap.has(bType) ? orderMap.get(bType) : Number.MAX_SAFE_INTEGER;
+    if (aOrder !== bOrder) {
+      return aOrder - bOrder;
+    }
+    return 0;
+  });
+}
 
 /**
  * 发送 HTTP 请求到盘搜API
@@ -386,7 +450,11 @@ async function formatDriveSearchResults(data, keyword) {
   }
 
   OmniBox.log("info", `格式化完成，最终结果数量: ${results.length}`);
-  return results;
+  const sortedResults = sortResultsByDriveOrder(results);
+  if (sortedResults.length > 1) {
+    OmniBox.log("info", `搜索结果按 DRIVE_ORDER 排序后顺序: ${sortedResults.map((item) => item.type_name || item.type_id || "未知").join(" | ")}`);
+  }
+  return sortedResults;
 }
 
 /**
@@ -1051,9 +1119,17 @@ async function detail(params) {
         });
         const basePlayId = fileId ? `${shareURL}|${fileId}` : "";
 
+        let displayFileName = fileName;
+        if (fileSize > 0) {
+          const fileSizeStr = formatFileSize(fileSize);
+          if (fileSizeStr) {
+            displayFileName = `[${fileSizeStr}] ${fileName}`;
+          }
+        }
+
         // 构建剧集对象
         const episode = {
-          name: fileName,
+          name: displayFileName,
           playId: playMeta ? `${basePlayId}|${playMeta}` : basePlayId,
           size: fileSize > 0 ? fileSize : undefined,
           rawName: originalFileName,
@@ -1189,6 +1265,13 @@ async function detail(params) {
       if (scrapeData.status) {
         // status字段可以作为类型名称
       }
+    }
+
+    if (Array.isArray(playSources) && playSources.length > 1 && DRIVE_ORDER.length > 0) {
+      const sortedPlaySources = sortPlaySourcesByDriveOrder(playSources);
+      playSources.length = 0;
+      playSources.push(...sortedPlaySources);
+      OmniBox.log("info", `按 DRIVE_ORDER 排序后线路顺序: ${playSources.map((item) => item.name).join(" | ")}`);
     }
 
     return {

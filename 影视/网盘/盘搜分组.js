@@ -1,7 +1,7 @@
 // @name 盘搜分组
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持，只支持tvbox接口
-// @version 1.0.6
+// @version 1.1.0
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/盘搜分组.js
 
 /**
@@ -37,7 +37,96 @@ const PANCHECK_PLATFORMS = process.env.PANCHECK_PLATFORMS || "";
 const DRIVE_TYPE_CONFIG = (process.env.DRIVE_TYPE_CONFIG || "quark;uc").split(';').map((t) => t.trim()).filter(Boolean);
 // 线路名称配置: 使用分号分隔，例如 本地代理;服务端代理;直连
 const SOURCE_NAMES_CONFIG = (process.env.SOURCE_NAMES_CONFIG || "本地代理;服务端代理;直连").split(';').map((s) => s.trim()).filter(Boolean);
+// 详情页播放线路和搜索分组的网盘排序顺序
+const DRIVE_ORDER = (process.env.DRIVE_ORDER || "baidu;tianyi;quark;uc;115;xunlei;ali;123pan").split(';').map((s) => s.trim().toLowerCase()).filter(Boolean);
 // ==================== 配置区域结束 ====================  
+
+function inferDriveTypeFromSourceName(name = "") {
+    const raw = String(name || "").toLowerCase();
+    if (raw.includes("百度")) return "baidu";
+    if (raw.includes("天翼")) return "tianyi";
+    if (raw.includes("夸克")) return "quark";
+    if (raw === "uc" || raw.includes("uc")) return "uc";
+    if (raw.includes("115")) return "115";
+    if (raw.includes("迅雷")) return "xunlei";
+    if (raw.includes("阿里")) return "ali";
+    if (raw.includes("123")) return "123pan";
+    return raw;
+}
+
+function normalizeDriveType(driveType = "") {
+    const raw = String(driveType || "").toLowerCase();
+    if (raw.includes("aliyun") || raw.includes("ali") || raw.includes("阿里")) return "ali";
+    if (raw.includes("baidu") || raw.includes("百度")) return "baidu";
+    if (raw.includes("tianyi") || raw.includes("天翼")) return "tianyi";
+    if (raw.includes("quark") || raw.includes("夸克")) return "quark";
+    if (raw === "uc" || raw.includes("uc")) return "uc";
+    if (raw.includes("115")) return "115";
+    if (raw.includes("xunlei") || raw.includes("迅雷")) return "xunlei";
+    if (raw.includes("123pan") || raw === "123" || raw.includes("123")) return "123pan";
+    return raw;
+}
+
+function sortPlaySourcesByDriveOrder(playSources = []) {
+    if (!Array.isArray(playSources) || playSources.length <= 1 || DRIVE_ORDER.length === 0) {
+        return playSources;
+    }
+
+    const orderMap = new Map(DRIVE_ORDER.map((name, index) => [name, index]));
+    return [...playSources].sort((a, b) => {
+        const aType = inferDriveTypeFromSourceName(a?.name || "");
+        const bType = inferDriveTypeFromSourceName(b?.name || "");
+        const aOrder = orderMap.has(aType) ? orderMap.get(aType) : Number.MAX_SAFE_INTEGER;
+        const bOrder = orderMap.has(bType) ? orderMap.get(bType) : Number.MAX_SAFE_INTEGER;
+        if (aOrder !== bOrder) {
+            return aOrder - bOrder;
+        }
+        return 0;
+    });
+}
+
+function sortGroupResultsByDriveOrder(results = []) {
+    if (!Array.isArray(results) || results.length <= 1 || DRIVE_ORDER.length === 0) {
+        return results;
+    }
+
+    const orderMap = new Map(DRIVE_ORDER.map((name, index) => [name, index]));
+    return [...results].sort((a, b) => {
+        const aType = normalizeDriveType(a?.panType || a?.vod_id || a?.vod_name || "");
+        const bType = normalizeDriveType(b?.panType || b?.vod_id || b?.vod_name || "");
+        const aOrder = orderMap.has(aType) ? orderMap.get(aType) : Number.MAX_SAFE_INTEGER;
+        const bOrder = orderMap.has(bType) ? orderMap.get(bType) : Number.MAX_SAFE_INTEGER;
+        if (aOrder !== bOrder) {
+            return aOrder - bOrder;
+        }
+        return 0;
+    });
+}
+
+function formatFileSize(size) {
+    if (!size || size <= 0) {
+        return "";
+    }
+
+    const unit = 1024;
+    const units = ["B", "K", "M", "G", "T", "P"];
+
+    if (size < unit) {
+        return `${size}B`;
+    }
+
+    let exp = 0;
+    let sizeFloat = size;
+    while (sizeFloat >= unit && exp < units.length - 1) {
+        sizeFloat /= unit;
+        exp++;
+    }
+
+    if (sizeFloat === Math.floor(sizeFloat)) {
+        return `${Math.floor(sizeFloat)}${units[exp]}`;
+    }
+    return `${sizeFloat.toFixed(2)}${units[exp]}`;
+}
 
 // 网盘类型映射
 const PAN_TYPES = {
@@ -305,11 +394,17 @@ async function formatDriveSearchResultsGrouped(data, keyword, validLinksSet) {
             type_name: "网盘分类",
             vod_remarks: `${count}条结果`,
             vod_tag: "folder",
+            panType: driveType,
         });
     }
 
-    OmniBox.log("info", `格式化完成（分组模式）,分类数量: ${results.length}`);
-    return results;
+    const sortedResults = sortGroupResultsByDriveOrder(results);
+    if (sortedResults.length > 1) {
+        OmniBox.log("info", `分组按 DRIVE_ORDER 排序后顺序: ${sortedResults.map((item) => item.panType || item.vod_name || "未知").join(" | ")}`);
+    }
+
+    OmniBox.log("info", `格式化完成（分组模式）,分类数量: ${sortedResults.length}`);
+    return sortedResults;
 }
 
 /**
@@ -882,8 +977,16 @@ async function detail(params) {
                     }
                 }
 
+                let displayFileName = fileName;
+                if (fileSize > 0) {
+                    const fileSizeStr = formatFileSize(fileSize);
+                    if (fileSizeStr) {
+                        displayFileName = `[${fileSizeStr}] ${fileName}`;
+                    }
+                }
+
                 const episode = {
-                    name: fileName,
+                    name: displayFileName,
                     playId: fileId ? `${shareURL}|${fileId}` : "",
                     size: fileSize > 0 ? fileSize : undefined,
                 };
@@ -936,6 +1039,13 @@ async function detail(params) {
                     episodes: episodes,
                 });
             }
+        }
+
+        if (Array.isArray(playSources) && playSources.length > 1 && DRIVE_ORDER.length > 0) {
+            const sortedPlaySources = sortPlaySourcesByDriveOrder(playSources);
+            playSources.length = 0;
+            playSources.push(...sortedPlaySources);
+            OmniBox.log("info", `按 DRIVE_ORDER 排序后线路顺序: ${playSources.map((item) => item.name).join(" | ")}`);
         }
 
         const displayNameFromFileList = fileList.displayName || fileList.display_name || "";

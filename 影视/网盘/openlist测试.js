@@ -2,7 +2,7 @@
 const OmniBox = require("omnibox_sdk");
 // @downloadURL https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/main/影视/网盘/openlist测试.js
 
-// ==========================================
+// =========================================
 // 必填配置
 // ==========================================
 const OPENLIST_URL   = "http://192.168.2.31:5255";
@@ -351,14 +351,29 @@ async function buildVodList(items, type = "movie", tmdbKey) {
     });
 }
 
-// ===== 递归扫描目录（用于电影）=====
-async function scanDirectoryForMedia(path, depth = 0, maxDepth = 10) {
+// ===== 递归扫描目录（增强版：同时识别电影和剧集）=====
+async function scanDirectoryForMedia(path, depth = 0, maxDepth = 10, parentType = null) {
     if (depth > maxDepth) return [];
 
     const items = await listDir(path);
     if (!items || items.length === 0) return [];
 
     const result = [];
+    
+    // 先检查当前目录是否包含剧集文件
+    let hasEpisodeFiles = false;
+    for (const item of items) {
+        if (item && isVideoFile(item.name)) {
+            const name = item.name;
+            if (name.match(/[Ss]\d+[Ee]\d+/) ||      // S01E01
+                name.match(/第\s*\d+\s*[集期]/) ||   // 第1集
+                name.match(/EP?\s*\d+/i)) {          // EP01, E01
+                hasEpisodeFiles = true;
+                break;
+            }
+        }
+    }
+    
     for (const item of items) {
         if (!item) continue;
         const itemName = item.name || "";
@@ -370,23 +385,37 @@ async function scanDirectoryForMedia(path, depth = 0, maxDepth = 10) {
             const cleanName = removeVideoExt(itemName);
             const parts = itemPath.split("/");
             const folderName = parts.length >= 2 ? parts[parts.length - 2] : cleanName;
-
+            
+            // 判断这个视频是电影还是剧集
+            let mediaType = "movie";
+            
+            // 如果父级有剧集标记，或者文件名包含剧集模式
+            if (parentType === "tv" || hasEpisodeFiles || 
+                itemName.match(/[Ss]\d+[Ee]\d+/) || 
+                itemName.match(/第\s*\d+\s*[集期]/) ||
+                itemName.match(/EP?\s*\d+/i)) {
+                mediaType = "tv";
+            }
+            
             result.push({
                 vod_id:       itemPath,
                 vod_name:     cleanName,
                 display_name: cleanName,
                 tmdb_id:      tmdbId,
-                _folder:      folderName   // 所属文件夹名
+                _folder:      folderName,
+                _type:        mediaType  // 添加类型标记
             });
         } else if (isDir) {
-            const sub = await scanDirectoryForMedia(itemPath, depth + 1, maxDepth);
+            // 传递当前目录的剧集状态给子目录
+            const subType = hasEpisodeFiles ? "tv" : (parentType || null);
+            const sub = await scanDirectoryForMedia(itemPath, depth + 1, maxDepth, subType);
             result.push(...sub);
         }
     }
     return result;
 }
 
-// ===== 扫描电视剧/短剧/动漫分类：递归寻找真正的剧名文件夹 =====
+// ===== 扫描电视剧/短剧/动漫分类：基于集数命名模式识别 =====
 async function scanTVShows(path, depth = 0, maxDepth = 5) {
     if (depth > maxDepth) return [];
 
@@ -394,34 +423,47 @@ async function scanTVShows(path, depth = 0, maxDepth = 5) {
     if (!items || items.length === 0) return [];
 
     let shows = [];
-    let hasVideoFiles = false;
-
-    // 检查此目录是否有直接视频文件
+    
+    // 检查当前目录是否包含剧集文件（S01E01 或 第1集 等模式）
+    let hasEpisodeFiles = false;
+    let episodePatterns = [];
+    
     for (const item of items) {
         if (!item) continue;
-        if (isVideoFile(item.name)) {
-            hasVideoFiles = true;
-            break;
+        const name = item.name || "";
+        
+        // 检测剧集命名模式
+        if (isVideoFile(name)) {
+            // 检查是否为剧集格式
+            if (name.match(/[Ss]\d+[Ee]\d+/) ||      // S01E01
+                name.match(/第\s*\d+\s*[集期]/) ||   // 第1集
+                name.match(/EP?\s*\d+/i) ||          // EP01, E01
+                name.match(/\d{1,2}x\d{2}/)) {       // 1x01
+                hasEpisodeFiles = true;
+                episodePatterns.push(name);
+            }
         }
     }
-
-    // 如果此分类目录已有视频文件，说明该文件夹就是一部剧的集合（极大增强了容错，避免很多用户文件夹没取tmdbid而被漏掉）
-    if (hasVideoFiles && depth > 0) {
+    
+    // 如果当前目录包含剧集文件，且不是根目录，则认为这是一部剧
+    if (hasEpisodeFiles && depth > 0) {
         let folderPath = path;
         const parts = path.split('/');
         let folderName = parts[parts.length - 1];
-
-        // 如果当前直接包含视频的文件夹名字也是纯季数标志如 "Season 1", "S01", "第1季"
-        // 那么真正的剧名其实是它的上一级文件夹
+        
+        // 如果当前文件夹是季数文件夹（Season 1, S01, 第1季）
         if (/^(season\s*\d+|s\d+|第.*?季)$/i.test(folderName.trim())) {
             if (parts.length >= 2) {
                 folderName = parts[parts.length - 2];
                 folderPath = parts.slice(0, -1).join('/');
             }
+            OmniBox.log("info", `[TV扫描] 检测到季文件夹: ${folderName} → 实际剧名: ${folderName}`);
         }
-
+        
         const tmdbId = extractTMDBId(folderName);
         const cleanName = folderName.replace(/\s*tmdbid=\d+/i, "").trim();
+        
+        OmniBox.log("info", `[TV扫描] 发现剧集: ${cleanName} (${episodePatterns.length} 个剧集文件)`);
         
         return [{
             vod_id:       folderPath,
@@ -429,19 +471,22 @@ async function scanTVShows(path, depth = 0, maxDepth = 5) {
             display_name: cleanName,
             tmdb_id:      tmdbId,
             is_show:      true,
-            _type:        "tv"
+            _type:        "tv",
+            episode_count: episodePatterns.length
         }];
     }
-
+    
+    // 递归扫描子目录
     for (const item of items) {
         if (!item || !isDirectory(item)) continue;
         const itemName = item.name || "";
         const itemPath = path.replace(/\/$/, "") + "/" + itemName;
-        const tmdbId   = extractTMDBId(itemName);
-
+        const tmdbId = extractTMDBId(itemName);
+        
         if (tmdbId) {
-            // 有 tmdbid → 这是真正的剧名文件夹，直接收录，不再深究
+            // 有 tmdbid 标记的文件夹，直接收录
             const cleanName = itemName.replace(/\s*tmdbid=\d+/i, "").trim();
+            OmniBox.log("info", `[TV扫描] 发现带TMDB标记的剧集: ${cleanName}`);
             shows.push({
                 vod_id:       itemPath,
                 vod_name:     cleanName,
@@ -451,21 +496,23 @@ async function scanTVShows(path, depth = 0, maxDepth = 5) {
                 _type:        "tv"
             });
         } else {
-            // 没有 tmdbid → 可能是中间分类文件夹（如"华语"、"短剧合集"等），继续递归
-            // 如果是个普通带视频的文件夹，深一层的时候就会从上方的 `hasVideoFiles` 判断抛上来！
+            // 没有 tmdbid，继续递归扫描
             const sub = await scanTVShows(itemPath, depth + 1, maxDepth);
             shows.push(...sub);
         }
     }
-
-    // 在每一层组装时去重，避免因识别 Season 1、Season 2 抛出了重复的父级剧目录
+    
+    // 去重
     if (shows.length > 0) {
         const unique = {};
         shows.forEach(s => { unique[s.vod_id] = s; });
         shows = Object.values(unique);
     }
-
-    if (depth === 0) OmniBox.log("info", `TV/动漫类目录 [${path}] 共找到 ${shows.length} 部剧`);
+    
+    if (depth === 0) {
+        OmniBox.log("info", `[TV扫描] 目录 [${path}] 共找到 ${shows.length} 部剧集`);
+    }
+    
     return shows;
 }
 
@@ -519,26 +566,66 @@ async function scanCategoryWithCache(path, mediaType = "movie", forceRefresh = f
 
         let items;
         if (mediaType === "tv") {
+            // 剧集类型使用专门的剧集扫描函数
             items = await scanTVShows(path);
+            
+            // 如果 scanTVShows 返回空，尝试用通用扫描但过滤出剧集
+            if (!items || items.length === 0) {
+                OmniBox.log("info", `剧集扫描未找到结构化剧集，尝试通用扫描`);
+                const allMedia = await scanDirectoryForMedia(path);
+                // 过滤出可能是剧集的项（有集数模式或包含多集）
+                items = allMedia.filter(item => {
+                    return item._type === "tv" || 
+                           item.vod_name.match(/[Ss]\d+[Ee]\d+/) ||
+                           item.vod_name.match(/第\s*\d+\s*[集期]/);
+                });
+                // 按文件夹分组
+                const grouped = {};
+                items.forEach(item => {
+                    const folder = item._folder;
+                    if (!grouped[folder]) {
+                        grouped[folder] = {
+                            vod_id: item.vod_id.split('/').slice(0, -1).join('/'),
+                            vod_name: folder,
+                            display_name: folder,
+                            tmdb_id: extractTMDBId(folder),
+                            _type: "tv",
+                            episodes: []
+                        };
+                    }
+                    grouped[folder].episodes = grouped[folder].episodes || [];
+                    grouped[folder].episodes.push(item);
+                });
+                items = Object.values(grouped);
+            }
         } else if (mediaType === "raw") {
             const actualPath = path.startsWith("rawdir#") ? path.substring(7) : (path === "openlist_raw_root" ? CONTENT_ROOT : path);
             items = await scanRawCategory(actualPath);
         } else {
+            // 电影类型使用通用扫描
             items = await scanDirectoryForMedia(path);
+            // 过滤掉明显的剧集文件
+            items = items.filter(item => {
+                return item._type === "movie" && 
+                       !item.vod_name.match(/[Ss]\d+[Ee]\d+/) &&
+                       !item.vod_name.match(/第\s*\d+\s*[集期]/);
+            });
         }
 
         // 为每个项目添加类型标记
         if (items) {
             items.forEach(item => {
-                item._type = mediaType;
+                if (!item._type) {
+                    item._type = mediaType;
+                }
             });
         }
 
-        OmniBox.log("info", `找到 ${items.length} 条数据，耗时 ${Date.now() - start}ms`);
+        OmniBox.log("info", `找到 ${items?.length || 0} 条数据，耗时 ${Date.now() - start}ms`);
 
-        cache.movies = items;
+        cache.movies = items || [];
         cache.loaded = true;
-        return items;
+        return cache.movies;
     } catch (e) {
         OmniBox.log("error", `扫描失败: ${e.message}`);
         return cache.movies;

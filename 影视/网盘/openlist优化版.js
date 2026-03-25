@@ -1,5 +1,6 @@
 // @name OpenList影视库优化版 
 const OmniBox = require("omnibox_sdk");
+// @downloadURL https://gh-proxy.org/https://github.com/lansepyy/OmniBox-Spider/edit/main/影视/网盘/openlist优化版.js
 
 // ==========================================
 // 必填配置

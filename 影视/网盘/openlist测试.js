@@ -20,7 +20,7 @@ const CUSTOM_CATEGORIES = [
         type_name: "🎬 电影",
         media_type: "movie",
         path: "",  // 配置专用路径，如 "/移动盘/电影"，为空则使用根目录自动识别
-        hidden: true  // true=隐藏，false=显示
+        hidden: false  // true=隐藏，false=显示
     },
     // 电视剧分类
     {
@@ -28,7 +28,7 @@ const CUSTOM_CATEGORIES = [
         type_name: "📺 电视剧",
         media_type: "tv",
         path: "",
-        hidden: true  // true=隐藏，false=显示
+        hidden: false  // true=隐藏，false=显示
     },
     // 动漫分类
     {
@@ -36,7 +36,7 @@ const CUSTOM_CATEGORIES = [
         type_name: "🎌 动漫",
         media_type: "tv",
         path: "",
-        hidden: true  // true=隐藏，false=显示
+        hidden: false  // true=隐藏，false=显示
     },
     // 短剧分类
     {
@@ -44,7 +44,7 @@ const CUSTOM_CATEGORIES = [
         type_name: "📱 短剧",
         media_type: "tv",
         path: "",
-        hidden: true  // true=隐藏，false=显示
+        hidden: false  // true=隐藏，false=显示
     },
     // 综艺分类（新增示例）
     {
@@ -52,7 +52,7 @@ const CUSTOM_CATEGORIES = [
         type_name: "🎪 综艺",
         media_type: "tv",
         path: "",
-        hidden: true  // true=隐藏，false=显示
+        hidden: false  // true=隐藏，false=显示
     },
     // 全部文件分类（免刮削）
     {
@@ -60,7 +60,7 @@ const CUSTOM_CATEGORIES = [
         type_name: "📂 全部文件",
         media_type: "raw",
         path: "",
-        hidden: true  // true=隐藏，false=显示
+        hidden: false  // true=隐藏，false=显示
     }
 ];
 
@@ -203,14 +203,21 @@ function isDirectory(item) {
 function extractTMDBId(name) {
     if (!name) return null;
 
-    const match = name.match(/tmdbid=(\d+)/i);
-    if (match) return match[1];
+    // 格式1: tmdbid=123456
+    const match1 = name.match(/tmdbid=(\d+)/i);
+    if (match1) return match1[1];
 
-    const match2 = name.match(/[\[\({]tmdb[:\-]?(\d+)[\]\)}]/i);
+    // 格式2: [tmdb:123456] 或 [tmdb-123456] 或 {tmdb:123456} 或 {tmdb-123456}
+    const match2 = name.match(/[\[\({]tmdb[-:]?(\d+)[\]\)}]/i);
     if (match2) return match2[1];
 
-    const match3 = name.match(/^(\d+)$/);
-    if (match3 && match3[1].length >= 5) return match3[1];
+    // 格式3: {tmdb-123456} 的变体
+    const match3 = name.match(/\{tmdb-(\d+)\}/i);
+    if (match3) return match3[1];
+
+    // 格式4: 独立的纯数字（5位以上）
+    const match4 = name.match(/^(\d+)$/);
+    if (match4 && match4[1].length >= 5) return match4[1];
 
     return null;
 }
@@ -275,6 +282,7 @@ async function getCategoriesAndMappings(forceRefresh = false) {
         fixed_tv: [],
         fixed_anime: [],
         fixed_short: [],
+        fixed_variety: [],
         fixed_raw: []
     };
 
@@ -299,11 +307,16 @@ async function getCategoriesAndMappings(forceRefresh = false) {
         OmniBox.log("info", `扫描根目录自动识别 [${category.type_name}]: ${scanPath}`);
         const items = await listDir(scanPath);
 
-        if (items) {
+        if (items && Array.isArray(items)) {
             items.filter(item => item && isDirectory(item)).forEach(item => {
                 const name = item.name;
                 const path = scanPath.replace(/\/$/, "") + "/" + name;
                 const classId = detectFixedClass(name);
+
+                // 防御：确保 mappings[classId] 存在且是数组
+                if (!mappings[classId]) {
+                    mappings[classId] = [];
+                }
 
                 if (classId === category.type_id) {
                     OmniBox.log("info", `  📁 自动映射: ${name} → ${category.type_name}`);
@@ -312,7 +325,7 @@ async function getCategoriesAndMappings(forceRefresh = false) {
             });
         }
 
-        if (mappings[category.type_id].length === 0) {
+        if (mappings[category.type_id] && mappings[category.type_id].length === 0) {
             OmniBox.log("info", `  ⚠️ ${category.type_name} 分类未匹配到任何目录`);
         }
     }
@@ -422,42 +435,64 @@ async function getTMDBInfo(id, type = "movie", tmdbConfig = null) {
 }
 
 // =========================================
-// 清理文件名用于 TMDB 搜索
+// 清理文件名用于 TMDB 搜索 - 智能处理复杂名称
 // =========================================
 function cleanSearchName(name) {
     if (!name) return "";
     let clean = name;
     clean = removeVideoExt(clean);
 
-    clean = clean.replace(/\[.*?\]/g, ' ').replace(/【.*?】/g, ' ');
-    clean = clean.replace(/[\|｜_~—]/g, '.');
-
-    const yearMatch = clean.match(/[\. \-\(]((19|20)\d{2})([\. \-\)]|$)/);
-    if (yearMatch) {
-        clean = clean.substring(0, yearMatch.index);
-    }
-
-    const junkMatch = clean.match(/[\. \-\(](1080p|720p|2160p|4k|blu-?ray|web-?dl|hdrip|bdrip|x264|x265|hevc|dd5\.1|aac|ac3|国语|中字|双语|bd1080p|bd|ts|tc)/i);
-    if (junkMatch) {
-        clean = clean.substring(0, junkMatch.index);
-    }
-
-    if (/[\u4e00-\u9fa5]/.test(clean)) {
-        if (clean.includes('.')) {
-            const parts = clean.split('.');
-            const chinesePart = parts.find(p => /[\u4e00-\u9fa5]/.test(p));
-            if (chinesePart) return chinesePart.trim();
-        } else if (clean.includes(' ')) {
-            const parts = clean.split(' ');
-            const chinesePart = parts.find(p => /[\u4e00-\u9fa5]/.test(p));
-            if (chinesePart) return chinesePart.trim();
+    // 方案1：如果以中文开头，优先提取连续的中文字符串
+    const chineseStart = clean.match(/^([\u4e00-\u9fa5\s·—～\-\·]+)/);
+    if (chineseStart) {
+        let chineseTitle = chineseStart[1].trim();
+        chineseTitle = chineseTitle.replace(/\s+/g, ' ').trim();
+        if (chineseTitle && chineseTitle.length > 1) {
+            return chineseTitle;
         }
-        clean = clean.replace(/_/g, ' ');
-    } else {
-        clean = clean.replace(/[\._]/g, ' ');
     }
 
-    return clean.trim();
+    // 方案2：如果以英文/数字开头，提取到第一个特殊标记（括号、年份、质量标记）
+    const englishMatch = clean.match(/^([A-Za-z0-9\s\-&:'\.]+?)[\s\(【\{]/);
+    if (englishMatch) {
+        let englishTitle = englishMatch[1].trim();
+        if (englishTitle && englishTitle.length > 1) {
+            // 给英文标题增加年份信息以区分不同版本
+            const yearInName = clean.match(/\((19|20)\d{2}\)/);
+            if (yearInName) {
+                return `${englishTitle} ${yearInName[0]}`;
+            }
+            return englishTitle;
+        }
+    }
+    
+    // 方案3：移除各种括号及其内容后重新处理
+    let cleaned = clean.replace(/\[.*?\]/g, ' ').replace(/【.*?】/g, ' ').replace(/\{.*?\}/g, ' ');
+    cleaned = cleaned.replace(/\(.*?\)/g, ' ').replace(/（.*?）/g, ' ');
+    cleaned = cleaned.replace(/[\|｜_~—]/g, ' ');
+
+    // 提取年份前的部分
+    const yearMatch = cleaned.match(/[\. \-\s]((19|20)\d{2})([\. \-\s]|$)/);
+    if (yearMatch) {
+        cleaned = cleaned.substring(0, yearMatch.index);
+    }
+
+    // 移除质量标记和编码信息
+    const qualityMatch = cleaned.match(/[\. \-\s]([Ss]\d+[Ee]?\d*|[SsEe]\d+|1080p|720p|2160p|4k|blu-?ray|web-?dl|hdrip|bdrip|x264|x265|hevc|dd5\.1|aac|ac3|国语|中字|双语|bd|ts|remux|webrip|dts|atmos|hdr|edr|三季|四季|五季|全|豆瓣)/i);
+    if (qualityMatch) {
+        cleaned = cleaned.substring(0, qualityMatch.index);
+    }
+
+    // 处理中文标题
+    if (/[\u4e00-\u9fa5]/.test(cleaned)) {
+        cleaned = cleaned.trim();
+        return cleaned.replace(/\s+/g, ' ').trim();
+    } else {
+        // 英文标题处理
+        cleaned = cleaned.replace(/[\._]/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+
+    return cleaned.trim();
 }
 
 // =========================================
@@ -534,7 +569,8 @@ function getMovieSearchName(fileName, folderName) {
 // 控制并发数量避免频率限制（最多5个并发）
 // =========================================
 async function buildVodList(items, type = "movie", tmdbConfig) {
-    if (!items || items.length === 0) return [];
+    // 防御：确保 items 是数组
+    if (!Array.isArray(items) || items.length === 0) return [];
 
     if (type === "raw") {
         return items.map(media => ({
@@ -557,32 +593,69 @@ async function buildVodList(items, type = "movie", tmdbConfig) {
         let nameToSearch = m.vod_name;
         if (itemType === "movie") {
             nameToSearch = getMovieSearchName(m.vod_name, m._folder);
+            
+            // 电影：优先用文件夹名识别，失败则用原文件名
+            const result = await searchTMDBInfo(nameToSearch, itemType, tmdbConfig);
+            if (!result && m.vod_name && m.vod_name !== nameToSearch) {
+                OmniBox.log("info", `[后备搜索] 文件夹名 "${nameToSearch}" 搜索失败，尝试文件名 "${m.vod_name}"`);
+                return await searchTMDBInfo(m.vod_name, itemType, tmdbConfig);
+            }
+            return result;
         } else {
+            // TV 剧：优先用视频文件名（样本集）识别，失败则用文件夹名
             nameToSearch = m.display_name || m.vod_name;
+            
+            const result = await searchTMDBInfo(nameToSearch, itemType, tmdbConfig);
+            if (!result && m._sample_episode && m._sample_episode !== nameToSearch) {
+                OmniBox.log("info", `[后备搜索] 文件夹名 "${nameToSearch}" 搜索失败，尝试视频文件名 "${m._sample_episode}"`);
+                return await searchTMDBInfo(m._sample_episode, itemType, tmdbConfig);
+            }
+            return result;
         }
-        return searchTMDBInfo(nameToSearch, itemType, tmdbConfig);
     });
     
     // 使用并发控制执行 TMDB 请求（最多5个并发）
     const tmdbResults = await executeConcurrent(tasks, 5);
-    return items.map((movie, i) => {
-        const tmdb = tmdbResults[i];
-        if (tmdb) {
-            return {
-                vod_id: movie.vod_id,
-                vod_name: tmdb.title,
-                vod_pic: tmdb.pic,
-                vod_year: tmdb.year,
-                vod_remarks: movie._folder && movie._folder !== movie.vod_name ? movie._folder : (type === "movie" ? "电影" : "剧集")
-            };
+    
+    // 防御：确保 tmdbResults 是数组且长度匹配
+    const results = Array.isArray(tmdbResults) ? tmdbResults : [];
+    
+    // 防御：遍历 items 并安全地从 results 中获取对应元素
+    const resultList = [];
+    for (let i = 0; i < items.length; i++) {
+        const movie = items[i];
+        
+        // 防御：确保 movie 是有效对象
+        if (!movie || typeof movie !== 'object' || !movie.vod_id) {
+            resultList.push({
+                vod_id: `unknown_${i}`,
+                vod_name: "未知",
+                vod_pic: "",
+                vod_remarks: "错误"
+            });
+            continue;
         }
-        return {
-            vod_id: movie.vod_id,
-            vod_name: movie.display_name,
-            vod_pic: "",
-            vod_remarks: movie._folder && movie._folder !== movie.vod_name ? movie._folder : "视频"
-        };
-    });
+        
+        const tmdb = results[i];
+        if (tmdb && typeof tmdb === 'object' && tmdb.title) {
+            resultList.push({
+                vod_id: movie.vod_id,
+                vod_name: tmdb.title || "",
+                vod_pic: tmdb.pic || "",
+                vod_year: tmdb.year || "",
+                vod_remarks: (movie._folder && movie._folder !== movie.vod_name) ? movie._folder : (type === "movie" ? "电影" : "剧集")
+            });
+        } else {
+            resultList.push({
+                vod_id: movie.vod_id,
+                vod_name: movie.display_name || movie.vod_name || "",
+                vod_pic: "",
+                vod_remarks: (movie._folder && movie._folder !== movie.vod_name) ? movie._folder : "视频"
+            });
+        }
+    }
+    
+    return resultList;
 }
 
 // =========================================
@@ -685,6 +758,9 @@ async function scanTVShows(path, depth = 0, maxDepth = 5) {
 
         const tmdbId = extractTMDBId(folderName);
         const cleanName = folderName.replace(/\s*tmdbid=\d+/i, "").trim();
+        
+        // 保存样本视频文件名，作为备用搜索文本
+        const sampleEpisode = episodePatterns[0] ? removeVideoExt(episodePatterns[0]) : cleanName;
 
         OmniBox.log("info", `[TV扫描] 发现剧集: ${cleanName} (${episodePatterns.length} 个剧集文件)`);
 
@@ -695,7 +771,8 @@ async function scanTVShows(path, depth = 0, maxDepth = 5) {
             tmdb_id: tmdbId,
             is_show: true,
             _type: "tv",
-            episode_count: episodePatterns.length
+            episode_count: episodePatterns.length,
+            _sample_episode: sampleEpisode
         }];
     }
 
@@ -849,12 +926,14 @@ async function scanCategoryWithCache(path, mediaType = "movie", forceRefresh = f
 
         OmniBox.log("info", `找到 ${items?.length || 0} 条数据，耗时 ${Date.now() - start}ms`);
 
-        cache.movies = items || [];
+        // 防御：确保返回值总是数组
+        cache.movies = Array.isArray(items) ? items : [];
         cache.loaded = true;
         return cache.movies;
     } catch (e) {
         OmniBox.log("error", `扫描失败: ${e.message}`);
-        return cache.movies;
+        // 防御：异常情况下也确保返回数组
+        return Array.isArray(cache.movies) ? cache.movies : [];
     } finally {
         cache.scanning = false;
     }
@@ -872,7 +951,13 @@ async function getPagedList(categoryId, mediaType = "movie", page = 1, pageSize 
     const allLists = await Promise.all(
         paths.map(p => scanCategoryWithCache(p, mediaType, forceRefresh))
     );
-    allLists.forEach(list => { if (list) all.push(...list) });
+    
+    // 防御：确保每个元素都是数组
+    allLists.forEach(list => { 
+        if (Array.isArray(list) && list.length > 0) {
+            all.push(...list);
+        }
+    });
 
     if (!all || all.length === 0) return { movies: [], total: 0, page, pagecount: 0 };
 
@@ -887,7 +972,8 @@ async function getPagedList(categoryId, mediaType = "movie", page = 1, pageSize 
 // 随机取样 - 用于首页展示
 // =========================================
 function getRandomItems(arr, count = PAGE_SIZE) {
-    if (!arr || arr.length === 0) return [];
+    // 防御：确保 arr 是数组
+    if (!arr || !Array.isArray(arr) || arr.length === 0) return [];
     const shuffled = [...arr];
     for (let i = shuffled.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
@@ -903,43 +989,152 @@ async function home(params) {
     try {
         const forceRefresh = !!(params.force_refresh || params.refresh);
         const tmdbConfig = getTmdbConfig(params);
-        const { categories, mappings } = await getCategoriesAndMappings(forceRefresh);
+        
+        OmniBox.log("info", "[home] 开始加载首页...");
+        const result = await getCategoriesAndMappings(forceRefresh);
+        const categories = result ? result.categories : [];
+        const mappings = result ? result.mappings : {};
+        
+        OmniBox.log("info", `[home] 获取到 ${Array.isArray(categories) ? categories.length : 0} 个分类`);
 
-        const recCategories = categories.filter(cat => cat.media_type !== "raw");
+        // 防御：确保 categories 是数组
+        const safeCategories = Array.isArray(categories) ? categories : [];
+        const allRecCategories = safeCategories.filter(cat => cat && cat.media_type !== "raw");
+        const recCategories = Array.isArray(allRecCategories) ? allRecCategories : [];
+
+        OmniBox.log("info", `[home] 推荐分类数: ${recCategories.length}`);
+
+        // 防御：如果没有分类，返回空列表
+        if (!Array.isArray(recCategories) || recCategories.length === 0) {
+            OmniBox.log("info", "[home] 无推荐分类，返回空列表");
+            return { class: safeCategories.map(c => (c && c.type_id && c.type_name) ? { type_id: c.type_id, type_name: c.type_name } : { type_id: "unknown", type_name: "未知" }), list: [] };
+        }
 
         const allLists = await Promise.all(
-            recCategories.map(async cat => {
-                const paths = mappings[cat.type_id] || [];
-                const lists = await Promise.all(paths.map(p => scanCategoryWithCache(p, cat.media_type, forceRefresh)));
-                let merged = [];
-                lists.forEach(l => { if (l) merged.push(...l); });
-                return merged;
+            recCategories.map(async (cat, catIndex) => {
+                try {
+                    if (!cat || !cat.type_id) {
+                        OmniBox.log("error", `[home] 分类 ${catIndex} 无效`);
+                        return [];
+                    }
+                    
+                    const paths = (mappings && mappings[cat.type_id] && Array.isArray(mappings[cat.type_id])) ? mappings[cat.type_id] : [];
+                    OmniBox.log("info", `[home] 分类 ${cat.type_id} 有 ${paths.length} 个路径`);
+                    
+                    // 防御：确保 paths 是数组
+                    if (!Array.isArray(paths) || paths.length === 0) return [];
+                    
+                    const lists = await Promise.all(paths.map(p => scanCategoryWithCache(p, cat.media_type, forceRefresh)));
+                    let merged = [];
+                    
+                    // 防御：确保 lists 是数组
+                    if (Array.isArray(lists)) {
+                        for (let i = 0; i < lists.length; i++) {
+                            const l = lists[i];
+                            if (Array.isArray(l) && l.length > 0) {
+                                merged.push(...l);
+                            }
+                        }
+                    }
+                    OmniBox.log("info", `[home] 分类 ${cat.type_id} 合并后有 ${merged.length} 项`);
+                    return merged;
+                } catch (e) {
+                    OmniBox.log("error", `[home] 分类 ${cat.type_id} 扫描失败: ${e.message}`);
+                    return [];
+                }
             })
         );
+        
+        OmniBox.log("info", `[home] allLists 长度: ${Array.isArray(allLists) ? allLists.length : 'not array'}`);
+        
+        // 防御：确保 allLists 是数组
+        const safeAllLists = Array.isArray(allLists) ? allLists : [];
 
         let combined = [];
-        recCategories.forEach((cat, i) => {
-            const sampled = getRandomItems(allLists[i], Math.ceil(PAGE_SIZE / recCategories.length));
-            sampled.forEach(m => { m._type = cat.media_type; });
-            combined.push(...sampled);
-        });
+        // 防御：确保 recCategories 和 safeAllLists 长度匹配，使用 for 循环逐个处理
+        const categoriesCount = Array.isArray(recCategories) ? recCategories.length : 0;
+        const listsCount = safeAllLists.length;
+        
+        OmniBox.log("info", `[home] 开始组合数据: 分类数=${categoriesCount}, 列表数=${listsCount}`);
+        
+        for (let i = 0; i < categoriesCount; i++) {
+            try {
+                const cat = recCategories[i];
+                if (!cat || typeof cat !== 'object') {
+                    OmniBox.log("error", `[home] recCategories[${i}] 无效`);
+                    continue;
+                }
+                
+                const itemList = (i < listsCount && Array.isArray(safeAllLists[i])) ? safeAllLists[i] : [];
+                const sampleSize = Math.ceil(PAGE_SIZE / (categoriesCount > 0 ? categoriesCount : 1));
+                const sampled = getRandomItems(itemList, sampleSize);
+                
+                if (Array.isArray(sampled) && sampled.length > 0) {
+                    sampled.forEach(m => { if (m && typeof m === 'object') m._type = cat.media_type; });
+                    combined.push(...sampled);
+                }
+                OmniBox.log("info", `[home] 分类 ${i} (${cat.type_name}) 采样 ${sampled.length} 项`);
+            } catch (e) {
+                OmniBox.log("error", `[home] 第 ${i} 个分类组合失败: ${e.message}`);
+                continue;
+            }
+        }
+        
+        OmniBox.log("info", `[home] 组合后总数: ${combined.length}`);
+        
         combined = getRandomItems(combined, PAGE_SIZE);
+        OmniBox.log("info", `[home] 打乱后: ${combined.length}`);
 
-        const movieItems = combined.filter(m => m._type !== "tv");
-        const tvItems = combined.filter(m => m._type === "tv");
+        // 防御：确保 combined 是数组，并且安全地 filter
+        const safeCombined = Array.isArray(combined) ? combined : [];
+        const safeMovieItems = safeCombined.filter(m => m && m._type !== "tv");
+        const safeTvItems = safeCombined.filter(m => m && m._type === "tv");
+        
+        OmniBox.log("info", `[home] 电影 ${safeMovieItems.length} 项, 电视${safeTvItems.length} 项`);
 
         const [movieList, tvList] = await Promise.all([
-            buildVodList(movieItems, "movie", tmdbConfig),
-            buildVodList(tvItems, "tv", tmdbConfig)
+            buildVodList(safeMovieItems, "movie", tmdbConfig),
+            buildVodList(safeTvItems, "tv", tmdbConfig)
         ]);
 
-        const vodMap = {};
-        [...movieList, ...tvList].forEach(v => { vodMap[v.vod_id] = v; });
-        const list = combined.map(m => vodMap[m.vod_id]).filter(Boolean);
+        // 防御：确保返回的都是数组
+        const safeMovieList = Array.isArray(movieList) ? movieList : [];
+        const safeTvList = Array.isArray(tvList) ? tvList : [];
+        
+        OmniBox.log("info", `[home] 构建后: 电影 ${safeMovieList.length} 项, 电视 ${safeTvList.length} 项`);
 
-        return { class: categories.map(c => ({ type_id: c.type_id, type_name: c.type_name })), list };
+        const vodMap = {};
+        // 防御：安全地构建vodMap
+        if (Array.isArray(safeMovieList) && safeMovieList.length > 0) {
+            safeMovieList.forEach(v => { if (v && v.vod_id) vodMap[v.vod_id] = v; });
+        }
+        if (Array.isArray(safeTvList) && safeTvList.length > 0) {
+            safeTvList.forEach(v => { if (v && v.vod_id) vodMap[v.vod_id] = v; });
+        }
+        
+        // 防御：确保 safeCombined 是数组，再 map
+        let list = [];
+        if (Array.isArray(safeCombined) && safeCombined.length > 0) {
+            for (let i = 0; i < safeCombined.length; i++) {
+                const m = safeCombined[i];
+                if (m && m.vod_id && vodMap[m.vod_id]) {
+                    list.push(vodMap[m.vod_id]);
+                }
+            }
+        }
+        
+        OmniBox.log("info", `[home] 最终列表: ${list.length} 项`);
+
+        const classData = safeCategories.map(c => {
+            if (c && c.type_id && c.type_name) {
+                return { type_id: c.type_id, type_name: c.type_name };
+            }
+            return { type_id: "unknown", type_name: "未知" };
+        });
+        
+        return { class: classData, list };
     } catch (e) {
-        OmniBox.log("error", `首页失败: ${e.message}`);
+        OmniBox.log("error", `首页失败: ${e.message}, 堆栈: ${e.stack}`);
         return { class: [], list: [] };
     }
 }
@@ -974,8 +1169,9 @@ async function category(params) {
             const addBack = !isRoot;
             
             const items = await scanRawCategory(targetPath, addBack, backId);
-            const list = await buildVodList(items, "raw", tmdbConfig);
-            return { page: 1, pagecount: 1, total: list.length, list };
+            const safeItems = Array.isArray(items) ? items : [];
+            const list = await buildVodList(safeItems, "raw", tmdbConfig);
+            return { page: 1, pagecount: 1, total: list.length || 0, list };
         }
 
         // 处理全部文件分类（fixed_raw），添加返回按钮
@@ -990,8 +1186,9 @@ async function category(params) {
             // 扫描根目录并添加返回按钮（返回至分类列表）
             const targetPath = rawRoots[0];
             const items = await scanRawCategory(targetPath, true, "fixed_raw");
-            const list = await buildVodList(items, "raw", tmdbConfig);
-            return { page: 1, pagecount: 1, total: list.length, list };
+            const safeItems = Array.isArray(items) ? items : [];
+            const list = await buildVodList(safeItems, "raw", tmdbConfig);
+            return { page: 1, pagecount: 1, total: list.length || 0, list };
         }
 
         const { categories } = await getCategoriesAndMappings(forceRefresh);
@@ -1003,9 +1200,17 @@ async function category(params) {
         }
 
         const result = await getPagedList(categoryId, cat.media_type, page, PAGE_SIZE, forceRefresh);
-        const list = await buildVodList(result.movies, cat.media_type, tmdbConfig);
+        
+        // 防御：确保 result 是有效对象
+        if (!result || typeof result !== 'object') {
+            OmniBox.log("error", `分类列表查询返回无效结果: ${categoryId}`);
+            return { page: 1, pagecount: 0, total: 0, list: [] };
+        }
+        
+        const safeMovies = Array.isArray(result.movies) ? result.movies : [];
+        const list = await buildVodList(safeMovies, cat.media_type, tmdbConfig);
 
-        return { page: result.page, pagecount: result.pagecount, total: result.total, list };
+        return { page: result.page || 1, pagecount: result.pagecount || 0, total: result.total || 0, list };
     } catch (e) {
         OmniBox.log("error", `分类失败: ${e.message}`);
         return { page: 1, pagecount: 0, total: 0, list: [] };
@@ -1074,11 +1279,15 @@ async function search(params) {
             buildVodList(tvItems, "tv", tmdbConfig)
         ]);
 
-        const list = [...movieList, ...tvList];
+        // 防御：确保返回的都是数组
+        const safeMovieList = Array.isArray(movieList) ? movieList : [];
+        const safeTvList = Array.isArray(tvList) ? tvList : [];
+        
+        const list = [...safeMovieList, ...safeTvList];
 
         return {
             list,
-            total: list.length,
+            total: list.length || 0,
             page: 1,
             pagecount: 1
         };

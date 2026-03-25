@@ -2,12 +2,25 @@
 const OmniBox = require("omnibox_sdk");
 // @downloadURL https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/main/影视/网盘/openlist测试.js
 
-// =========================================
+// ========================================
 // 必填配置
 // ==========================================
 const OPENLIST_URL   = "http://192.168.2.31:5255";
 const OPENLIST_TOKEN = "";
-// 内容根目录（脚本会自动扫描此目录下的第一层子文件夹作为分类归属的判断）
+
+// ==========================================
+// 分类路径配置（优先级高于根目录）
+// 如果配置了某个分类的专用路径，则该分类只使用该路径
+// 如果某个分类未配置，则使用根目录并自动识别
+// ==========================================
+const CATEGORY_PATHS = {
+    fixed_movie: "",   // 电影专用路径，例如："/移动盘/电影"
+    fixed_tv: "",      // 电视剧专用路径，例如："/移动盘/电视剧"
+    fixed_anime: "",   // 动漫专用路径，例如："/移动盘/动漫"
+    fixed_short: ""    // 短剧专用路径，例如："/移动盘/短剧"
+};
+
+// 内容根目录（当某个分类没有配置专用路径时，使用此根目录进行自动识别）
 const CONTENT_ROOT   = "/189分享/189share";
 
 // ==========================================
@@ -120,14 +133,24 @@ function detectFixedClass(folderName) {
     return "fixed_movie"; // 未命中默认分配给电影
 }
 
+// 获取某个分类的实际扫描路径
+function getCategoryScanPath(categoryId) {
+    // 如果配置了专用路径，直接返回
+    if (CATEGORY_PATHS[categoryId] && CATEGORY_PATHS[categoryId].trim()) {
+        const path = CATEGORY_PATHS[categoryId].trim();
+        OmniBox.log("info", `使用专用路径 [${categoryId}]: ${path}`);
+        return path;
+    }
+    // 否则返回根目录
+    OmniBox.log("info", `使用根目录自动识别 [${categoryId}]: ${CONTENT_ROOT}`);
+    return CONTENT_ROOT;
+}
+
 // 获取分类列表（扫描并更新映射关系缓存）
 async function getCategoriesAndMappings(forceRefresh = false) {
     if (!forceRefresh && FOLDER_MAPPINGS) {
         return { categories: FIXED_CLASSES, mappings: FOLDER_MAPPINGS };
     }
-
-    OmniBox.log("info", `扫描根目录获取分类并进行自动映射: ${CONTENT_ROOT}`);
-    const items = await listDir(CONTENT_ROOT);
 
     // 初始化映射表
     const mappings = {
@@ -137,14 +160,41 @@ async function getCategoriesAndMappings(forceRefresh = false) {
         fixed_short: []
     };
 
-    if (items) {
-        items.filter(item => item && isDirectory(item)).forEach(item => {
-            const name = item.name;
-            const path = CONTENT_ROOT.replace(/\/$/, "") + "/" + name;
-            const classId = detectFixedClass(name);
-            OmniBox.log("info", `  📁 自动映射目录: ${name} → 分类归属[${classId}]`);
-            mappings[classId].push(path);
-        });
+    // 为每个分类确定扫描路径
+    for (const category of FIXED_CLASSES) {
+        if (category.type_id === "openlist_raw_root") continue; // 跳过免刮削分类
+        
+        const scanPath = getCategoryScanPath(category.type_id);
+        
+        // 如果分类有专用路径，直接使用该路径，不需要自动识别
+        if (CATEGORY_PATHS[category.type_id] && CATEGORY_PATHS[category.type_id].trim()) {
+            mappings[category.type_id] = [scanPath];
+            OmniBox.log("info", `[${category.type_name}] 使用专用路径: ${scanPath}`);
+            continue;
+        }
+        
+        // 否则使用根目录，扫描第一层子目录进行自动识别
+        OmniBox.log("info", `扫描根目录自动识别 [${category.type_name}]: ${scanPath}`);
+        const items = await listDir(scanPath);
+        
+        if (items) {
+            items.filter(item => item && isDirectory(item)).forEach(item => {
+                const name = item.name;
+                const path = scanPath.replace(/\/$/, "") + "/" + name;
+                const classId = detectFixedClass(name);
+                
+                // 只有当识别的分类与当前分类匹配时才添加
+                if (classId === category.type_id) {
+                    OmniBox.log("info", `  📁 自动映射: ${name} → ${category.type_name}`);
+                    mappings[classId].push(path);
+                }
+            });
+        }
+        
+        // 如果该分类没有匹配到任何目录，记录警告
+        if (mappings[category.type_id].length === 0) {
+            OmniBox.log("info", `  ⚠️ ${category.type_name} 分类未匹配到任何目录`);
+        }
     }
 
     FOLDER_MAPPINGS = mappings;

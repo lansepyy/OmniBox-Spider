@@ -215,7 +215,17 @@ function extractTMDBId(name) {
     return null;
 }
 
-const VIDEO_EXTS = [".strm", ".mp4", ".mkv", ".avi", ".rmvb", ".mov", ".flv", ".wmv", ".ts"];
+const VIDEO_EXTS = [
+    // 常见视频格式
+    ".strm", ".mp4", ".mkv", ".avi", ".rmvb", ".mov", ".flv", ".wmv", ".ts",
+    // 其他视频格式
+    ".webm", ".m4v", ".3gp", ".m3u8", ".mpg", ".mpeg", ".vob", ".asf", ".f4v", ".ogv",
+    ".mts", ".m2ts", ".divx", ".dv", ".vob", ".qt", ".mxf", ".bik",
+    // 音频格式（支持音乐播放）
+    ".mp3", ".aac", ".flac", ".opus", ".wma", ".ac3", ".dts", ".wav", ".ogg", ".m4a", ".aiff",
+    // 光盘镜像格式
+    ".iso"
+];
 
 // ===== 辅助工具 =====
 function isVideoFile(name) {

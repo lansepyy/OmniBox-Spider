@@ -3,7 +3,8 @@
 // @description OmniBox 蜜桃站最终稳定修复版（封面+播放地址+分页支持）
 /* @dependencies: axios, cheerio */
 // @version 1.4.0
-// @downloadURL https://gh-proxy.org/https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/9dd1851c3929a36f430abd94fd7b5c075c7e0b41/影视/采集/蜜桃.js
+// @downloadURL https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/5dc8db4f61161a9b329dccb26cabdbfe8fe1ed21/影视/采集/蜜桃臀.js
+
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");

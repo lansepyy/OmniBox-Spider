@@ -1,9 +1,9 @@
 // @name 蜜桃臀18+
 // @author ChatGPT
-// @description OmniBox 蜜桃站最终稳定修复版（封面+播放地址+分页修复）- 参考电影天堂分页逻辑
+// @description OmniBox 蜜桃站最终稳定修复版（封面+播放地址+分页修复v2）
 /* @dependencies: axios, cheerio */
-// @version 1.5.0
-// @downloadURL https://gh-proxy.org/https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/main/影视/采集/蜜桃臀.js 
+// @version 1.6.0
+// @downloadURL https://gh-proxy.org/https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/main/影视/采集/蜜桃臀.js
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");
@@ -64,9 +64,9 @@ async function request(url, retryCount = 0) {
 
         return res.data || "";
     } catch (error) {
-        if (retryCount < 2) {
-            logInfo(`请求失败，重试 ${retryCount + 1}/2`, { url, error: error.message });
-            await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
+        if (retryCount < 2 && error.response?.status !== 404) {
+            logInfo(`请求失败，重试 ${retryCount + 1}/2`, { url, error: error.message, status: error.response?.status });
+            await new Promise(resolve => setTimeout(resolve, 2000 * (retryCount + 1)));
             return request(url, retryCount + 1);
         }
         throw error;
@@ -85,11 +85,10 @@ function toInt(value) {
     return 0;
 }
 
-// ================= 解析扩展参数（参考电影天堂） =================
+// ================= 解析扩展参数 =================
 function parseExtendParams(params = {}) {
     const result = {};
 
-    // 从 extend 参数解析（Base64编码的JSON）
     if (params.extend) {
         try {
             const decodedStr = Buffer.from(String(params.extend), "base64").toString("utf-8");
@@ -103,7 +102,6 @@ function parseExtendParams(params = {}) {
         }
     }
 
-    // 从 filters 参数解析
     if (params.filters && typeof params.filters === "object") {
         Object.assign(result, params.filters);
     } else if (typeof params.filters === "string" && params.filters.trim()) {
@@ -118,6 +116,69 @@ function parseExtendParams(params = {}) {
     }
 
     return result;
+}
+
+// ================= 构建分页URL（智能检测） =================
+function buildPageUrl(originalUrl, page) {
+    if (page <= 1) return originalUrl;
+    
+    logInfo("构建分页URL", { originalUrl, page });
+    
+    // 1. 如果URL已经是分页格式，直接替换页码
+    // 格式1: /list/xxx/2.html 或 /list/xxx_2.html
+    let match = originalUrl.match(/(.+?)([\/_])(\d+)(\.html)$/i);
+    if (match) {
+        const newUrl = match[1] + match[2] + page + match[4];
+        logInfo("使用格式1（替换页码）", { newUrl });
+        return newUrl;
+    }
+    
+    // 2. 格式2: /list/xxx?page=2
+    if (originalUrl.includes('?')) {
+        if (originalUrl.includes('page=')) {
+            const newUrl = originalUrl.replace(/page=\d+/, 'page=' + page);
+            logInfo("使用格式2（替换query参数）", { newUrl });
+            return newUrl;
+        } else {
+            const newUrl = originalUrl + '&page=' + page;
+            logInfo("使用格式2（添加query参数）", { newUrl });
+            return newUrl;
+        }
+    }
+    
+    // 3. 格式3: /list/xxx/page/2/
+    if (originalUrl.endsWith('/')) {
+        const newUrl = originalUrl + 'page/' + page + '/';
+        logInfo("使用格式3（路径分页）", { newUrl });
+        return newUrl;
+    }
+    
+    // 4. 格式4: /list/xxx/2 （无.html后缀）
+    if (originalUrl.match(/\/list\/[^\/]+$/)) {
+        const newUrl = originalUrl + '/' + page;
+        logInfo("使用格式4（添加页码路径）", { newUrl });
+        return newUrl;
+    }
+    
+    // 5. 格式5: /list/xxx_2 （无.html后缀）
+    if (originalUrl.match(/\/list\/[^\/]+$/)) {
+        const newUrl = originalUrl + '_' + page;
+        logInfo("使用格式5（下划线添加页码）", { newUrl });
+        return newUrl;
+    }
+    
+    // 6. 默认格式：/list/xxx/index_2.html
+    if (originalUrl.endsWith('.html')) {
+        const baseUrl = originalUrl.replace(/\.html$/, '');
+        const newUrl = baseUrl + '_' + page + '.html';
+        logInfo("使用默认格式（下划线+页码+.html）", { newUrl });
+        return newUrl;
+    }
+    
+    // 7. 最后尝试：直接添加页码
+    const newUrl = originalUrl + '_' + page + '.html';
+    logInfo("使用兜底格式", { newUrl });
+    return newUrl;
 }
 
 // ================= 增强的封面图提取函数 =================
@@ -492,8 +553,6 @@ async function home() {
 
             const vod_pic = extractHomePic(a, $);
             
-            logInfo("提取到视频", { title, vodId, vod_pic });
-
             list.push({
                 vod_id: vodId,
                 vod_name: title,
@@ -518,7 +577,7 @@ async function home() {
     }
 }
 
-// ================= 分类（参考电影天堂分页逻辑） =================
+// ================= 分类（修复分页URL构建） =================
 async function category(params) {
     try {
         // 获取分类URL和页码
@@ -527,42 +586,60 @@ async function category(params) {
         
         logInfo("分类请求", { originalUrl: url, page, params });
         
-        // 解析扩展参数（支持分页状态保持）
+        // 解析扩展参数
         const extObj = parseExtendParams(params);
-        logInfo("解析后的扩展参数", extObj);
-        
-        // 如果extObj中有页码，优先使用（某些TVBOX版本通过extend传递页码）
-        if (extObj.page && !params.page) {
+        if (extObj.page) {
             page = toInt(extObj.page);
             logInfo("从extend参数获取页码", { page });
         }
         
-        // 构建分页URL
-        let pageUrl = url;
-        if (page > 1) {
-            // 尝试多种分页格式
-            if (url.includes('?')) {
-                if (url.includes('page=')) {
-                    pageUrl = url.replace(/page=\d+/, 'page=' + page);
-                } else {
-                    pageUrl = url + '&page=' + page;
-                }
-            } else {
-                // 检查是否已经是分页格式（如 /list/xxx/2.html）
-                if (url.match(/\/list\/[^\/]+\/\d+\.html/)) {
-                    pageUrl = url.replace(/\/(\d+)\.html/, '/' + page + '.html');
-                } else if (url.endsWith('.html')) {
-                    pageUrl = url.replace(/\.html/, '_' + page + '.html');
-                } else if (url.endsWith('/')) {
-                    pageUrl = url + 'page/' + page + '/';
-                } else {
-                    pageUrl = url + '/page/' + page;
-                }
-            }
+        // 使用智能分页URL构建
+        let pageUrl = buildPageUrl(url, page);
+        
+        // 如果是第一页，使用原始URL
+        if (page === 1) {
+            pageUrl = url;
         }
         
         logInfo("请求分类页面", { pageUrl });
-        const html = await request(pageUrl);
+        
+        let html;
+        try {
+            html = await request(pageUrl);
+        } catch (error) {
+            // 如果请求失败且不是第一页，尝试其他分页格式
+            if (page > 1 && error.response?.status === 404) {
+                logInfo("当前分页格式失败，尝试其他格式", { pageUrl });
+                
+                // 尝试其他格式
+                const alternativeFormats = [
+                    url.replace(/\.html$/, '_' + page + '.html'),
+                    url + (url.includes('?') ? '&' : '?') + 'page=' + page,
+                    url + '/page/' + page,
+                    url + '/' + page,
+                ];
+                
+                let success = false;
+                for (const altUrl of alternativeFormats) {
+                    try {
+                        logInfo("尝试替代格式", { altUrl });
+                        html = await request(altUrl);
+                        pageUrl = altUrl;
+                        success = true;
+                        break;
+                    } catch (e) {
+                        continue;
+                    }
+                }
+                
+                if (!success) {
+                    throw error;
+                }
+            } else {
+                throw error;
+            }
+        }
+        
         const $ = cheerio.load(html);
 
         const list = [];
@@ -608,11 +685,7 @@ async function category(params) {
             "a[href*='page=']",
             ".page-numbers",
             "a.page-link",
-            ".pager a",
-            ".next a",
-            ".prev a",
-            "a:contains('下一页')",
-            "a:contains('下页')"
+            ".pager a"
         ];
         
         let maxPageNum = 1;
@@ -622,18 +695,15 @@ async function category(params) {
                 const href = $(el).attr("href") || "";
                 let pageNum = 0;
                 
-                // 从文本获取页码
                 if (/^\d+$/.test(text)) {
                     pageNum = parseInt(text);
                 }
                 
-                // 从链接获取页码
                 if (!pageNum && href) {
                     const pageMatch = href.match(/[?&]page=(\d+)/i) ||
                                      href.match(/page\/(\d+)/i) ||
                                      href.match(/\/(\d+)\.html/i) ||
-                                     href.match(/_(\d+)\.html/i) ||
-                                     href.match(/\/(\d+)\//i);
+                                     href.match(/_(\d+)\.html/i);
                     if (pageMatch) {
                         pageNum = parseInt(pageMatch[1]);
                     }
@@ -647,41 +717,30 @@ async function category(params) {
             if (maxPageNum > 1) break;
         }
         
-        // 如果通过链接没找到，尝试查找包含"下一页"的链接来推断
-        if (maxPageNum <= 1) {
+        if (maxPageNum > 1) {
+            totalPages = maxPageNum;
+        } else {
+            // 检查是否有下一页链接
             const nextLink = $("a:contains('下一页'), a:contains('下页'), a:contains('next'), a[rel='next']").first();
             if (nextLink.length && nextLink.attr("href")) {
-                // 有下一页，说明至少还有一页，设置一个较大的数值让客户端继续请求
                 totalPages = page + 10;
                 logInfo("检测到下一页链接，设置总页数为", { totalPages });
+            } else if (list.length > 0 && page === 1) {
+                // 第一页有数据但没有分页信息，可能只有一页
+                totalPages = 1;
+            } else if (list.length === 0 && page > 1) {
+                // 当前页无数据，说明已到最后一页
+                totalPages = page - 1;
+            } else {
+                totalPages = 999;
             }
-        } else {
-            totalPages = maxPageNum;
-        }
-        
-        // 如果列表为空且page>1，说明没有更多内容了，返回空列表
-        if (list.length === 0 && page > 1) {
-            logInfo("当前页无数据，可能已到最后一页", { page, listLength: list.length });
-            return {
-                page: page,
-                pagecount: page - 1, // 将pagecount设置为当前页-1，告知客户端没有更多内容
-                total: 0,
-                list: [],
-            };
-        }
-        
-        // 如果当前页有数据但未检测到总页数，设置一个较大的值让客户端继续尝试
-        if (totalPages <= 1 && list.length > 0) {
-            totalPages = 999;
-            logInfo("未检测到总页数，设置默认值", { totalPages });
         }
         
         logInfo("分类解析完成", { 
             pageUrl, 
             currentPage: page, 
             totalPages, 
-            videoCount: list.length,
-            listSample: list.slice(0, 3).map(v => ({ name: v.vod_name, id: v.vod_id }))
+            videoCount: list.length 
         });
 
         return {
@@ -693,7 +752,6 @@ async function category(params) {
     } catch (e) {
         logError("分类失败", e);
         
-        // 出错时返回空列表，避免无限重试
         return {
             list: [],
             page: 1,

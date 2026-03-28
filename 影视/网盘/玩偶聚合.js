@@ -2,7 +2,7 @@
 // @author @lucky_TJQ
 // @description 聚合玩偶、木偶、蜡笔、闪电、至臻、二小、虎斑、快映、欧哥、多多等网盘站点；支持刮削、弹幕、多线路、二级分类筛选、翻页、网盘排序
 // @dependencies axios,cheerio
-// @version 1.2.0
+// @version 1.2.1
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/玩偶聚合.js
 
 const OmniBox = require("omnibox_sdk");
@@ -41,6 +41,9 @@ const DRIVE_TYPE_CONFIG = (process.env.DRIVE_TYPE_CONFIG || "quark;uc")
 
 // 刮削开关（默认开启，设置环境变量 ENABLE_SCRAPE=0 关闭）
 const ENABLE_SCRAPE = process.env.ENABLE_SCRAPE !== "0";
+
+// 详情链路缓存时间（秒），默认 12 小时
+const WANOU_CACHE_EX_SECONDS = Number(process.env.WANOU_CACHE_EX_SECONDS || 43200);
 
 const PAGE_SIZE = 20;
 const REQUEST_TIMEOUT = 15000;
@@ -185,7 +188,63 @@ const INSECURE_HTTPS_AGENT = new https.Agent({ rejectUnauthorized: false });
 // ==================== 缓存 ====================
 const driveParseCache = new Map();
 const siteFilterCache = new Map();
-const CACHE_TTL = { drive: 60 * 60 * 1000, filter: 6 * 60 * 60 * 1000 };
+const playHistoryDedupeCache = new Map();
+const CACHE_TTL = { drive: 60 * 60 * 1000, filter: 6 * 60 * 1000 };
+
+function buildCacheKey(prefix, value) {
+  return `${prefix}:${value}`;
+}
+
+async function getCachedJSON(key) {
+  try {
+    return await OmniBox.getCache(key);
+  } catch (error) {
+    await OmniBox.log("warn", `[cache] 读取缓存失败: key=${key}, err=${error.message}`);
+    return null;
+  }
+}
+
+async function setCachedJSON(key, value, exSeconds) {
+  try {
+    await OmniBox.setCache(key, value, exSeconds);
+  } catch (error) {
+    await OmniBox.log("warn", `[cache] 写入缓存失败: key=${key}, err=${error.message}`);
+  }
+}
+
+async function getDriveInfoCached(shareURL) {
+  const cacheKey = buildCacheKey("wanou:driveInfo", shareURL);
+  let driveInfo = await getCachedJSON(cacheKey);
+  if (!driveInfo) {
+    driveInfo = await OmniBox.getDriveInfoByShareURL(shareURL);
+    await setCachedJSON(cacheKey, driveInfo, WANOU_CACHE_EX_SECONDS);
+  }
+  return driveInfo;
+}
+
+async function getRootFileListCached(shareURL) {
+  const cacheKey = buildCacheKey("wanou:rootFiles", shareURL);
+  let fileList = await getCachedJSON(cacheKey);
+  if (!fileList) {
+    fileList = await OmniBox.getDriveFileList(shareURL, "0");
+    if (Array.isArray(fileList?.files) && fileList.files.length > 0) {
+      await setCachedJSON(cacheKey, fileList, WANOU_CACHE_EX_SECONDS);
+    }
+  }
+  return fileList;
+}
+
+async function getAllVideoFilesCached(shareURL, rootFiles) {
+  const cacheKey = buildCacheKey("wanou:videoFiles", shareURL);
+  let allVideoFiles = await getCachedJSON(cacheKey);
+  if (!Array.isArray(allVideoFiles) || allVideoFiles.length === 0) {
+    allVideoFiles = await getAllVideoFiles(shareURL, rootFiles);
+    if (Array.isArray(allVideoFiles) && allVideoFiles.length > 0) {
+      await setCachedJSON(cacheKey, allVideoFiles, WANOU_CACHE_EX_SECONDS);
+    }
+  }
+  return allVideoFiles;
+}
 
 function splitSites(raw) {
   return String(raw || "")
@@ -693,7 +752,7 @@ async function handleSiteDetail(vodId, drives, context) {
   let playSources = [];
   const driveTypeCountMap = {};
   for (const { url: shareURL } of panItems) {
-    const driveInfo = await OmniBox.getDriveInfoByShareURL(shareURL);
+    const driveInfo = await getDriveInfoCached(shareURL);
     const displayName = driveInfo.displayName || "未知网盘";
     driveTypeCountMap[displayName] = (driveTypeCountMap[displayName] || 0) + 1;
   }
@@ -706,7 +765,7 @@ async function handleSiteDetail(vodId, drives, context) {
     try {
       await OmniBox.log("info", `[detail] 处理网盘链接: ${shareURL}`);
 
-      const driveInfo = await OmniBox.getDriveInfoByShareURL(shareURL);
+      const driveInfo = await getDriveInfoCached(shareURL);
       let displayName = driveInfo.displayName || "未知网盘";
       const totalCount = driveTypeCountMap[displayName] || 0;
       if (totalCount > 1) {
@@ -716,7 +775,7 @@ async function handleSiteDetail(vodId, drives, context) {
 
       await OmniBox.log("info", `[detail] 网盘类型: ${displayName}, driveType: ${driveInfo.driveType}`);
 
-      const fileList = await OmniBox.getDriveFileList(shareURL, "0");
+      const fileList = await getRootFileListCached(shareURL);
       if (!Array.isArray(fileList?.files) || fileList.files.length === 0) {
         await OmniBox.log("warn", `[detail] 获取文件列表失败: ${shareURL}`);
         return null;
@@ -724,7 +783,7 @@ async function handleSiteDetail(vodId, drives, context) {
 
       await OmniBox.log("info", `[detail] 从分享链接 ${shareURL} 获取文件列表成功,文件数量: ${fileList.files.length}`);
 
-      const allVideoFiles = await getAllVideoFiles(shareURL, fileList.files);
+      const allVideoFiles = await getAllVideoFilesCached(shareURL, fileList.files);
       if (allVideoFiles.length === 0) {
         await OmniBox.log("warn", `[detail] 未找到视频文件: ${shareURL}`);
         return null;
@@ -1327,28 +1386,36 @@ async function play(params, context) {
     try {
       const sourceId = context.sourceId;
       if (sourceId) {
-        const title = params.title || scrapeTitle || shareURL;
-        const pic = params.pic || scrapePic || "";
+        const dedupeKey = `${sourceId}|${playId}`;
+        const now = Date.now();
+        const lastAdded = playHistoryDedupeCache.get(dedupeKey);
+        if (lastAdded && now - lastAdded < 2000) {
+          await OmniBox.log("info", `[play] 跳过重复观看记录: ${dedupeKey}`);
+        } else {
+          playHistoryDedupeCache.set(dedupeKey, now);
+          const title = params.title || scrapeTitle || shareURL;
+          const pic = params.pic || scrapePic || "";
 
-        OmniBox.addPlayHistory({
-          vodId: scrapeKey,
-          title: title,
-          pic: pic,
-          episode: playId,
-          sourceId: sourceId,
-          episodeNumber: episodeNumber,
-          episodeName: episodeName,
-        })
-          .then((added) => {
-            if (added) {
-              OmniBox.log("info", `[play] 已添加观看记录: ${title}`);
-            } else {
-              OmniBox.log("info", `[play] 观看记录已存在,跳过添加: ${title}`);
-            }
+          OmniBox.addPlayHistory({
+            vodId: scrapeKey,
+            title: title,
+            pic: pic,
+            episode: playId,
+            sourceId: sourceId,
+            episodeNumber: episodeNumber,
+            episodeName: episodeName,
           })
-          .catch((error) => {
-            OmniBox.log("warn", `[play] 添加观看记录失败: ${error.message}`);
-          });
+            .then((added) => {
+              if (added) {
+                OmniBox.log("info", `[play] 已添加观看记录: ${title}`);
+              } else {
+                OmniBox.log("info", `[play] 观看记录已存在,跳过添加: ${title}`);
+              }
+            })
+            .catch((error) => {
+              OmniBox.log("warn", `[play] 添加观看记录失败: ${error.message}`);
+            });
+        }
       }
     } catch (error) {
       await OmniBox.log("warn", `[play] 添加观看记录失败: ${error.message}`);

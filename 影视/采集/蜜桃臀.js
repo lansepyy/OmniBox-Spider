@@ -1,9 +1,9 @@
-// @name 蜜桃臀
+// @name 蜜桃影视
 // @author ChatGPT
-// @description OmniBox 蜜桃站最终稳定修复版（封面+播放地址）- 增强封面提取
+// @description OmniBox 蜜桃站最终稳定修复版（封面+播放地址+分页支持）
 /* @dependencies: axios, cheerio */
-// @version 1.3.0
-// @downloadURL https://gh-proxy.org/https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/9dd1851c3929a36f430abd94fd7b5c075c7e0b41/影视/采集/蜜桃臀.js
+// @version 1.4.0
+// @downloadURL https://gh-proxy.org/https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/9dd1851c3929a36f430abd94fd7b5c075c7e0b41/影视/采集/蜜桃.js
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");
@@ -77,11 +77,9 @@ async function request(url, retryCount = 0) {
 function extractPic(element, $) {
     let pic = "";
     
-    // 从当前元素查找图片
     const img = element.find("img");
     
     if (img.length > 0) {
-        // 尝试各种图片属性
         pic = img.attr("data-original") ||
               img.attr("data-src") ||
               img.attr("src") ||
@@ -89,23 +87,13 @@ function extractPic(element, $) {
               img.attr("data-srcset") ||
               "";
         
-        // 如果还是没找到，尝试从 style 属性中提取
         if (!pic) {
             const style = img.attr("style") || "";
             const bgMatch = style.match(/background(?:-image)?:\s*url\(['"]?(.*?)['"]?\)/i);
             if (bgMatch) pic = bgMatch[1];
         }
-        
-        // 尝试从 class 中提取背景图
-        if (!pic) {
-            const classAttr = img.attr("class") || "";
-            if (classAttr.includes("lazy")) {
-                pic = img.attr("data-original") || img.attr("data-src");
-            }
-        }
     }
     
-    // 如果当前元素没有图片，尝试查找父级或兄弟元素中的图片
     if (!pic) {
         const parentImg = element.closest("a").find("img");
         if (parentImg.length > 0) {
@@ -116,16 +104,13 @@ function extractPic(element, $) {
         }
     }
     
-    // 如果还是没有，尝试从背景图中提取
     if (!pic) {
         const style = element.attr("style") || "";
         const bgMatch = style.match(/background(?:-image)?:\s*url\(['"]?(.*?)['"]?\)/i);
         if (bgMatch) pic = bgMatch[1];
     }
     
-    // 如果图片是相对路径，补全为绝对路径
     if (pic) {
-        // 处理可能的小图后缀，尝试获取大图
         pic = pic.replace(/-\w+\.(jpg|jpeg|png|webp)/i, '.$1');
         pic = toAbsUrl(pic);
     }
@@ -133,11 +118,9 @@ function extractPic(element, $) {
     return pic;
 }
 
-// ================= 首页增强封面提取 =================
 function extractHomePic(element, $) {
     let pic = "";
     
-    // 查找所有可能的图片元素
     const selectors = [
         element.find("img"),
         element.find(".lazy"),
@@ -159,7 +142,6 @@ function extractHomePic(element, $) {
         }
     }
     
-    // 如果还是没找到，尝试从背景图中提取
     if (!pic) {
         const bgElements = [
             element,
@@ -179,9 +161,7 @@ function extractHomePic(element, $) {
         }
     }
     
-    // 处理图片URL
     if (pic) {
-        // 替换可能的小图后缀
         pic = pic.replace(/-\d+x\d+\.(jpg|jpeg|png|webp)/i, '.$1');
         pic = pic.replace(/thumb\//i, '');
         pic = toAbsUrl(pic);
@@ -201,7 +181,6 @@ async function parseIframeContent(iframeUrl, depth = 0) {
         logInfo("解析 iframe 内容", { iframeUrl, depth });
         const html = await request(iframeUrl);
         
-        // 在 iframe 页面中直接查找播放地址
         const videoPatterns = [
             /https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/gi,
             /https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*/gi,
@@ -219,7 +198,6 @@ async function parseIframeContent(iframeUrl, depth = 0) {
             }
         }
         
-        // 查找 iframe 中的重定向
         const redirectMatch = html.match(/window\.location\.href\s*=\s*["']([^"']+)["']/i) ||
                              html.match(/location\.replace\(["']([^"']+)["']\)/i) ||
                              html.match(/setTimeout.*?location\.href=["']([^"']+)["']/i);
@@ -234,7 +212,6 @@ async function parseIframeContent(iframeUrl, depth = 0) {
             return parseIframeContent(redirectUrl, depth + 1);
         }
         
-        // 查找嵌套的 iframe
         const nestedIframe = html.match(/<iframe[^>]+src=["']([^"']+)["'][^>]*>/i);
         if (nestedIframe) {
             let nestedUrl = nestedIframe[1];
@@ -246,7 +223,6 @@ async function parseIframeContent(iframeUrl, depth = 0) {
             return parseIframeContent(nestedUrl, depth + 1);
         }
         
-        // 尝试从 JavaScript 变量中提取
         const jsVarPatterns = [
             /var\s+url\s*=\s*["']([^"']+)["']/i,
             /var\s+videoUrl\s*=\s*["']([^"']+)["']/i,
@@ -273,7 +249,6 @@ async function parseIframeContent(iframeUrl, depth = 0) {
 function parseVideoUrl(html, originalUrl) {
     let videoUrl = "";
     
-    // 1. 提取并解析 iframe
     const iframeMatches = html.match(/<iframe[^>]+src=["']([^"']+)["'][^>]*>/gi);
     if (iframeMatches) {
         for (let iframe of iframeMatches) {
@@ -292,7 +267,6 @@ function parseVideoUrl(html, originalUrl) {
         }
     }
     
-    // 2. 尝试解析页面中的播放器配置
     const playerConfigs = [
         /var\s+player_info\s*=\s*(\{[^;]+\})/i,
         /var\s+player_data\s*=\s*(\{[^;]+\})/i,
@@ -310,7 +284,6 @@ function parseVideoUrl(html, originalUrl) {
         if (match) {
             try {
                 let playerData = match[1];
-                // 处理可能的 JavaScript 对象格式
                 playerData = playerData.replace(/(\w+):/g, '"$1":');
                 const data = JSON.parse(playerData);
                 logInfo("找到播放器配置", data);
@@ -335,13 +308,10 @@ function parseVideoUrl(html, originalUrl) {
                 }
                 
                 if (videoUrl) break;
-            } catch (e) {
-                // JSON 解析失败，继续尝试
-            }
+            } catch (e) {}
         }
     }
     
-    // 3. 直接在页面中搜索视频地址
     if (!videoUrl) {
         const videoPatterns = [
             /https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/gi,
@@ -360,7 +330,6 @@ function parseVideoUrl(html, originalUrl) {
         }
     }
     
-    // 4. 提取 video 或 source 标签
     if (!videoUrl) {
         const videoMatch = html.match(/<video[^>]+src=["']([^"']+)["'][^>]*>/i) ||
                           html.match(/<source[^>]+src=["']([^"']+)["'][^>]*>/i);
@@ -369,7 +338,6 @@ function parseVideoUrl(html, originalUrl) {
         }
     }
     
-    // 5. 提取 JavaScript 变量
     if (!videoUrl) {
         const jsVarPatterns = [
             /var\s+url\s*=\s*["']([^"']+)["']/i,
@@ -389,7 +357,6 @@ function parseVideoUrl(html, originalUrl) {
         }
     }
     
-    // 6. Base64 解码
     if (!videoUrl && html.includes('base64')) {
         const base64Match = html.match(/atob\(["']([^"']+)["']\)/i);
         if (base64Match) {
@@ -403,7 +370,6 @@ function parseVideoUrl(html, originalUrl) {
         }
     }
     
-    // 7. 尝试从 script 标签中提取
     if (!videoUrl) {
         const scriptMatches = html.match(/<script[^>]*>([\s\S]*?)<\/script>/gi);
         if (scriptMatches) {
@@ -450,7 +416,6 @@ async function home() {
         const list = [];
         const cache = new Set();
 
-        // 更精准的视频条目选择器
         $(".video-item, .movie-item, .item, li[class*='video'], div[class*='movie'], a[href*='/detail/']").each((_, el) => {
             const a = $(el).is("a") ? $(el) : $(el).find("a[href*='/detail/']").first();
             
@@ -459,7 +424,6 @@ async function home() {
             const href = a.attr("href") || "";
             if (!href) return;
 
-            // 提取标题
             let title = a.attr("title") || 
                        a.find("img").attr("alt") || 
                        a.find(".title, .name, h3, h4").text().trim() ||
@@ -471,11 +435,8 @@ async function home() {
             if (cache.has(vodId)) return;
             cache.add(vodId);
 
-            // 使用增强的封面提取函数
             const vod_pic = extractHomePic(a, $);
             
-            logInfo("提取到视频", { title, vodId, vod_pic });
-
             list.push({
                 vod_id: vodId,
                 vod_name: title,
@@ -484,15 +445,12 @@ async function home() {
             });
         });
 
-        logInfo("首页完成", { classCount: classes.length, videoCount: list.length });
-
         return {
             class: classes,
-            list: list.slice(0, 30), // 限制首页数量
+            list: list.slice(0, 30),
         };
     } catch (e) {
         logError("首页失败", e);
-
         return {
             class: [],
             list: [],
@@ -500,21 +458,62 @@ async function home() {
     }
 }
 
-// ================= 分类 =================
+// ================= 分类（支持分页）=================
 async function category(params) {
     try {
-        const url = String(
-            params.type_id ||
-            params.categoryId ||
-            ""
-        );
-
-        const html = await request(url);
+        // TVBox 传递的参数格式
+        let url = params.type_id || params.categoryId || "";
+        let page = parseInt(params.page) || 1;
+        
+        logInfo("分类请求", { url, page, params });
+        
+        // 构建分页URL
+        let pageUrl = url;
+        
+        // 如果URL已经包含页码参数，先移除
+        pageUrl = pageUrl.replace(/[?&]page=\d+/, '');
+        pageUrl = pageUrl.replace(/[?&]p=\d+/, '');
+        
+        // 添加页码参数（根据网站实际分页格式调整）
+        if (pageUrl.includes('?')) {
+            pageUrl += `&page=${page}`;
+        } else {
+            pageUrl += `?page=${page}`;
+        }
+        
+        // 也尝试其他常见分页格式
+        const possibleUrls = [
+            pageUrl,
+            url.replace(/\/$/, '') + `/${page}.html`,
+            url + (url.includes('?') ? `&p=${page}` : `?p=${page}`),
+            url + (url.includes('?') ? `&pg=${page}` : `?pg=${page}`)
+        ];
+        
+        let html = "";
+        let successUrl = "";
+        
+        // 尝试不同的分页URL格式
+        for (let tryUrl of possibleUrls) {
+            try {
+                logInfo("尝试分页URL", { tryUrl });
+                html = await request(tryUrl);
+                successUrl = tryUrl;
+                break;
+            } catch (e) {
+                continue;
+            }
+        }
+        
+        if (!html) {
+            throw new Error("无法访问分页页面");
+        }
+        
         const $ = cheerio.load(html);
-
+        
         const list = [];
         const cache = new Set();
-
+        
+        // 提取视频列表
         $(".video-item, .movie-item, .item, li[class*='video'], div[class*='movie'], a[href*='/detail/']").each((_, el) => {
             const a = $(el).is("a") ? $(el) : $(el).find("a[href*='/detail/']").first();
             
@@ -522,18 +521,21 @@ async function category(params) {
             
             const href = a.attr("href") || "";
             if (!href) return;
-
+            
+            // 跳过可能是广告的链接
+            if (href.includes('ad') || href.includes('advert')) return;
+            
             const title = a.attr("title") || 
                          a.find("img").attr("alt") || 
                          a.find(".title, .name, h3, h4").text().trim() ||
                          a.text().trim();
             
-            if (!title) return;
-
+            if (!title || title.length < 1) return;
+            
             const vodId = toAbsUrl(href);
             if (cache.has(vodId)) return;
             cache.add(vodId);
-
+            
             const vod_pic = extractHomePic(a, $);
             
             list.push({
@@ -543,16 +545,71 @@ async function category(params) {
                 vod_remarks: a.find(".remarks, .episode, .tag").text().trim() || "",
             });
         });
-
+        
+        // 提取总页数
+        let totalPages = 1;
+        
+        // 查找分页信息
+        const paginationSelectors = [
+            '.page', '.pagination', '.pages', '.page-numbers',
+            '.next', '.prev', '.pager'
+        ];
+        
+        for (let selector of paginationSelectors) {
+            const pagination = $(selector);
+            if (pagination.length) {
+                const lastPageLink = pagination.find('a:last-child');
+                if (lastPageLink.length) {
+                    const lastPageHref = lastPageLink.attr('href') || "";
+                    const pageMatch = lastPageHref.match(/[?&]page=(\d+)/) || 
+                                    lastPageHref.match(/\/(\d+)\.html/);
+                    if (pageMatch) {
+                        totalPages = parseInt(pageMatch[1]) || 1;
+                        break;
+                    }
+                }
+                
+                // 尝试从文本中提取
+                const pageText = pagination.text();
+                const pageMatch = pageText.match(/共(\d+)页/) || pageText.match(/\/(\d+)/);
+                if (pageMatch) {
+                    totalPages = parseInt(pageMatch[1]) || 1;
+                    break;
+                }
+            }
+        }
+        
+        // 检查是否有下一页
+        let hasNextPage = false;
+        const nextLink = $('a:contains("下一页"), a:contains("next"), .next, .pagination-next');
+        if (nextLink.length && !nextLink.hasClass('disabled')) {
+            hasNextPage = true;
+            // 如果找到下一页链接，说明还有更多内容
+            if (totalPages === 1) totalPages = page + 1;
+        }
+        
+        // 如果当前页有内容且可能有下一页，设置总页数为当前页+1
+        if (list.length > 0 && (hasNextPage || list.length >= 20)) {
+            totalPages = Math.max(totalPages, page + 1);
+        }
+        
+        logInfo("分类完成", { 
+            page, 
+            totalPages, 
+            listCount: list.length,
+            hasNextPage 
+        });
+        
         return {
-            page: 1,
-            pagecount: 999,
-            total: list.length,
-            list,
+            page: page,
+            pagecount: totalPages,
+            total: list.length * totalPages, // 估算总数
+            list: list,
         };
+        
     } catch (e) {
         logError("分类失败", e);
-
+        
         return {
             list: [],
             page: 1,
@@ -575,7 +632,6 @@ async function detail(params) {
             $(".title, .vod-title").first().text().trim() ||
             $("title").text().trim();
 
-        // 增强的详情页封面提取
         let pic = "";
         
         const picSelectors = [
@@ -596,7 +652,6 @@ async function detail(params) {
             }
         }
         
-        // 如果没有找到，尝试从背景图中提取
         if (!pic) {
             const bgElements = [".detail", ".vod-detail", ".poster", ".cover", ".thumb"];
             for (let selector of bgElements) {
@@ -630,12 +685,6 @@ async function detail(params) {
             });
         });
 
-        logInfo("详情解析", {
-            title,
-            pic,
-            playCount: playSources.length,
-        });
-
         return {
             list: [
                 {
@@ -648,7 +697,6 @@ async function detail(params) {
         };
     } catch (e) {
         logError("详情失败", e);
-
         return {
             list: [],
         };
@@ -667,7 +715,6 @@ async function play(params) {
 
         const html = await request(playUrl);
         
-        // 检查是否有重定向
         const redirectMatch = html.match(/window\.location\.href\s*=\s*["']([^"']+)["']/i) ||
                              html.match(/location\.replace\(["']([^"']+)["']\)/i) ||
                              html.match(/setTimeout.*?location\.href=["']([^"']+)["']/i);
@@ -700,7 +747,6 @@ async function play(params) {
             };
         }
         
-        // 处理可能的多个地址（用 # 分隔）
         if (videoUrl.includes('#')) {
             const urls = videoUrl.split('#').map(url => ({
                 name: "播放地址",

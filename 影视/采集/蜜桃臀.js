@@ -1,9 +1,9 @@
 // @name 蜜桃臀18+
 // @author ChatGPT
-// @description OmniBox 蜜桃站最终稳定修复版（封面+播放地址+分页修复）
+// @description OmniBox 蜜桃站最终稳定修复版（封面+播放地址+分页修复）- 参考电影天堂分页逻辑
 /* @dependencies: axios, cheerio */
-// @version 1.4.0
-// @downloadURL https://gh-proxy.org/https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/main/影视/采集/蜜桃臀.js
+// @version 1.5.0
+// @downloadURL https://gh-proxy.org/https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/main/影视/采集/蜜桃臀.js 
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");
@@ -71,6 +71,53 @@ async function request(url, retryCount = 0) {
         }
         throw error;
     }
+}
+
+// ================= 安全转换为整数 =================
+function toInt(value) {
+    if (typeof value === "number") {
+        return Math.floor(value);
+    }
+    if (typeof value === "string") {
+        const num = parseInt(value, 10);
+        return isNaN(num) ? 0 : num;
+    }
+    return 0;
+}
+
+// ================= 解析扩展参数（参考电影天堂） =================
+function parseExtendParams(params = {}) {
+    const result = {};
+
+    // 从 extend 参数解析（Base64编码的JSON）
+    if (params.extend) {
+        try {
+            const decodedStr = Buffer.from(String(params.extend), "base64").toString("utf-8");
+            const extObj = JSON.parse(decodedStr);
+            if (extObj && typeof extObj === "object") {
+                Object.assign(result, extObj);
+            }
+            logInfo("解析extend参数", result);
+        } catch (error) {
+            logError(`解析extend参数失败: ${error.message}`);
+        }
+    }
+
+    // 从 filters 参数解析
+    if (params.filters && typeof params.filters === "object") {
+        Object.assign(result, params.filters);
+    } else if (typeof params.filters === "string" && params.filters.trim()) {
+        try {
+            const parsed = JSON.parse(params.filters);
+            if (parsed && typeof parsed === "object") {
+                Object.assign(result, parsed);
+            }
+        } catch (error) {
+            logError(`解析filters参数失败: ${error.message}`);
+        }
+    }
+
+    return result;
 }
 
 // ================= 增强的封面图提取函数 =================
@@ -471,25 +518,34 @@ async function home() {
     }
 }
 
-// ================= 分类（修复分页） =================
+// ================= 分类（参考电影天堂分页逻辑） =================
 async function category(params) {
     try {
         // 获取分类URL和页码
         let url = String(params.type_id || params.categoryId || "");
-        let page = parseInt(params.page) || 1;
+        let page = toInt(params.page) || 1;
         
-        logInfo("分类请求", { originalUrl: url, page });
+        logInfo("分类请求", { originalUrl: url, page, params });
+        
+        // 解析扩展参数（支持分页状态保持）
+        const extObj = parseExtendParams(params);
+        logInfo("解析后的扩展参数", extObj);
+        
+        // 如果extObj中有页码，优先使用（某些TVBOX版本通过extend传递页码）
+        if (extObj.page && !params.page) {
+            page = toInt(extObj.page);
+            logInfo("从extend参数获取页码", { page });
+        }
         
         // 构建分页URL
         let pageUrl = url;
         if (page > 1) {
             // 尝试多种分页格式
             if (url.includes('?')) {
-                pageUrl = url + (url.includes('page=') ? '' : '&page=') + page;
-                if (!url.includes('page=')) {
-                    pageUrl = url + '&page=' + page;
-                } else {
+                if (url.includes('page=')) {
                     pageUrl = url.replace(/page=\d+/, 'page=' + page);
+                } else {
+                    pageUrl = url + '&page=' + page;
                 }
             } else {
                 // 检查是否已经是分页格式（如 /list/xxx/2.html）
@@ -552,7 +608,11 @@ async function category(params) {
             "a[href*='page=']",
             ".page-numbers",
             "a.page-link",
-            ".pager a"
+            ".pager a",
+            ".next a",
+            ".prev a",
+            "a:contains('下一页')",
+            "a:contains('下页')"
         ];
         
         let maxPageNum = 1;
@@ -572,7 +632,8 @@ async function category(params) {
                     const pageMatch = href.match(/[?&]page=(\d+)/i) ||
                                      href.match(/page\/(\d+)/i) ||
                                      href.match(/\/(\d+)\.html/i) ||
-                                     href.match(/_(\d+)\.html/i);
+                                     href.match(/_(\d+)\.html/i) ||
+                                     href.match(/\/(\d+)\//i);
                     if (pageMatch) {
                         pageNum = parseInt(pageMatch[1]);
                     }
@@ -591,17 +652,36 @@ async function category(params) {
             const nextLink = $("a:contains('下一页'), a:contains('下页'), a:contains('next'), a[rel='next']").first();
             if (nextLink.length && nextLink.attr("href")) {
                 // 有下一页，说明至少还有一页，设置一个较大的数值让客户端继续请求
-                totalPages = page + 5;
+                totalPages = page + 10;
+                logInfo("检测到下一页链接，设置总页数为", { totalPages });
             }
         } else {
             totalPages = maxPageNum;
+        }
+        
+        // 如果列表为空且page>1，说明没有更多内容了，返回空列表
+        if (list.length === 0 && page > 1) {
+            logInfo("当前页无数据，可能已到最后一页", { page, listLength: list.length });
+            return {
+                page: page,
+                pagecount: page - 1, // 将pagecount设置为当前页-1，告知客户端没有更多内容
+                total: 0,
+                list: [],
+            };
+        }
+        
+        // 如果当前页有数据但未检测到总页数，设置一个较大的值让客户端继续尝试
+        if (totalPages <= 1 && list.length > 0) {
+            totalPages = 999;
+            logInfo("未检测到总页数，设置默认值", { totalPages });
         }
         
         logInfo("分类解析完成", { 
             pageUrl, 
             currentPage: page, 
             totalPages, 
-            videoCount: list.length 
+            videoCount: list.length,
+            listSample: list.slice(0, 3).map(v => ({ name: v.vod_name, id: v.vod_id }))
         });
 
         return {
@@ -612,7 +692,8 @@ async function category(params) {
         };
     } catch (e) {
         logError("分类失败", e);
-
+        
+        // 出错时返回空列表，避免无限重试
         return {
             list: [],
             page: 1,

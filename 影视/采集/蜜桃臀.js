@@ -1,4 +1,5 @@
-// @downloadURL https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/5dc8db4f61161a9b329dccb26cabdbfe8fe1ed21/影视/采集/蜜桃臀.js
+// @downloadURL https://gh-proxy.org/https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/main/影视/采集/蜜桃臀.js
+
 
 // @name 蜜桃影视
 // @author ChatGPT

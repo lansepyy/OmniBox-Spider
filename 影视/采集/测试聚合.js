@@ -1,19 +1,11 @@
 const OmniBox = require("omnibox_sdk");
 // @downloadURL https://gh-proxy.org/https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/main/影视/采集/测试聚合.js
 
-
-// ====== 你的CMS源（已提取）======
+// ===== CMS源 =====
 const CMS_SITES = [
   { name: "滴滴", api: "https://api.ddapi.cc/api.php/provide/vod" },
   { name: "鸡坤", api: "https://jkunzyapi.com/api.php/provide/vod" },
-  { name: "TG资源", api: "https://tgzyz.pp.ua/api.php/provide/vod" },
-  { name: "越南", api: "https://vnzyz.com/api.php/provide/vod" },
-  { name: "奥斯卡", api: "https://aosikazy4.com/api.php/provide/vod" },
-  { name: "X细胞", api: "https://www.xxibaozyw.com/api.php/provide/vod" },
-  { name: "大奶子", api: "https://apidanaizi.com/api.php/provide/vod" },
-  { name: "精品X", api: "https://www.jingpinx.com/api.php/provide/vod" },
-  { name: "老色p", api: "https://apilsbzy1.com/api.php/provide/vod" },
-  { name: "番号", api: "http://fhapi9.com/api.php/provide/vod" }
+  { name: "TG资源", api: "https://tgzyz.pp.ua/api.php/provide/vod" }
 ];
 
 // ===== 请求 =====
@@ -29,40 +21,54 @@ async function request(api, params = {}) {
   }
 }
 
-// ===== 首页（多源聚合）=====
-async function home() {
-  let allVideos = [];
-
-  for (const site of CMS_SITES) {
-    try {
-      const data = await request(site.api, { ac: "list", pg: 1 });
-      if (data.list) {
-        const list = data.list.slice(0, 5).map(v => ({
-          vod_id: site.api + "|" + v.vod_id,
-          vod_name: `[${site.name}] ` + v.vod_name,
-          vod_pic: v.vod_pic,
-          vod_remarks: v.vod_remarks
-        }));
-        allVideos.push(...list);
-      }
-    } catch {}
+// ===== 修复封面 =====
+function fixPic(pic) {
+  if (!pic || pic === "<nil>") {
+    return "https://via.placeholder.com/300x400?text=No+Image";
   }
-
-  return {
-    class: [
-      { type_id: "all", type_name: "🔥全部" }
-    ],
-    list: allVideos
-  };
+  if (pic.startsWith("//")) {
+    return "https:" + pic;
+  }
+  return pic;
 }
 
-// ===== 分类（单源，避免炸）=====
+// ===== 首页（分类+推荐）=====
+async function home() {
+  let classes = [];
+  let videos = [];
+
+  // 取第一个站点的分类
+  const first = await request(CMS_SITES[0].api, { ac: "class" });
+  if (first.class) {
+    classes = first.class.map(c => ({
+      type_id: CMS_SITES[0].api + "|" + c.type_id,
+      type_name: c.type_name
+    }));
+  }
+
+  // 推荐：多源聚合
+  for (const site of CMS_SITES) {
+    const data = await request(site.api, { ac: "list", pg: 1 });
+    if (data.list) {
+      videos.push(...data.list.slice(0, 5).map(v => ({
+        vod_id: site.api + "|" + v.vod_id,
+        vod_name: `[${site.name}] ` + v.vod_name,
+        vod_pic: fixPic(v.vod_pic),
+        vod_remarks: v.vod_remarks
+      })));
+    }
+  }
+
+  return { class: classes, list: videos };
+}
+
+// ===== 分类 =====
 async function category(params) {
-  const [api, typeId] = params.categoryId.split("|");
+  const [api, tid] = params.categoryId.split("|");
 
   const data = await request(api, {
     ac: "videolist",
-    t: typeId,
+    t: tid,
     pg: params.page || 1
   });
 
@@ -70,39 +76,33 @@ async function category(params) {
     list: (data.list || []).map(v => ({
       vod_id: api + "|" + v.vod_id,
       vod_name: v.vod_name,
-      vod_pic: v.vod_pic,
+      vod_pic: fixPic(v.vod_pic),
       vod_remarks: v.vod_remarks
     }))
   };
 }
 
-// ===== 搜索（全源并发）=====
+// ===== 搜索 =====
 async function search(params) {
-  const wd = params.wd;
-  let results = [];
+  let list = [];
 
-  await Promise.all(
-    CMS_SITES.map(async (site) => {
-      try {
-        const data = await request(site.api, {
-          ac: "list",
-          wd,
-          pg: 1
-        });
+  await Promise.all(CMS_SITES.map(async site => {
+    const data = await request(site.api, {
+      ac: "list",
+      wd: params.wd,
+      pg: 1
+    });
 
-        if (data.list) {
-          const list = data.list.map(v => ({
-            vod_id: site.api + "|" + v.vod_id,
-            vod_name: `[${site.name}] ` + v.vod_name,
-            vod_pic: v.vod_pic
-          }));
-          results.push(...list);
-        }
-      } catch {}
-    })
-  );
+    if (data.list) {
+      list.push(...data.list.map(v => ({
+        vod_id: site.api + "|" + v.vod_id,
+        vod_name: `[${site.name}] ` + v.vod_name,
+        vod_pic: fixPic(v.vod_pic)
+      })));
+    }
+  }));
 
-  return { list: results };
+  return { list };
 }
 
 // ===== 详情 =====
@@ -114,16 +114,35 @@ async function detail(params) {
     ids: id
   });
 
+  if (!data.list || !data.list[0]) return { list: [] };
+
+  const v = data.list[0];
+
   return {
-    list: data.list || []
+    list: [{
+      vod_id: id,
+      vod_name: v.vod_name,
+      vod_pic: fixPic(v.vod_pic),
+      vod_content: v.vod_content,
+      vod_play_from: v.vod_play_from,
+      vod_play_url: v.vod_play_url
+    }]
   };
 }
 
-// ===== 播放 =====
+// ===== 播放（关键修复）=====
 async function play(params) {
+  let url = params.id;
+
+  // 直链直接播
+  if (url.includes(".m3u8") || url.includes(".mp4")) {
+    return { parse: 0, url };
+  }
+
+  // 其余走解析
   return {
-    parse: 0,
-    url: params.id
+    parse: 1,
+    url
   };
 }
 

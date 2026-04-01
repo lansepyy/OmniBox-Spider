@@ -1,4 +1,6 @@
 const OmniBox = require("omnibox_sdk");
+// @downloadURL https://gh-proxy.org/https://raw.githubusercontent.com/lansepyy/OmniBox-Spider/main/影视/采集/测试聚合.js
+
 
 // ====== 你的CMS源（已提取）======
 const CMS_SITES = [

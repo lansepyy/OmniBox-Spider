@@ -1,7 +1,7 @@
 // @name 盘搜
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
-// @version 1.3.2
+// @version 1.3.3
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/盘搜.js
 /**
  * OmniBox 网盘爬虫脚本
@@ -580,6 +580,8 @@ async function formatDriveSearchResults(data, keyword) {
       const shareURL = String(item.url || item.URL || "");
       const note = String(item.note || item.Note || "");
       const images = item.images || item.Images || [];
+      const datetime = String(item.datetime || item.Datetime || "");
+      const source = item.source ? String(item.source).replace(/plugin:/gi, "plg:") : "";
 
       if (!shareURL) {
         continue;
@@ -600,14 +602,30 @@ async function formatDriveSearchResults(data, keyword) {
       // 构建vod_pic：使用images数组的第一个图片
       const vodPic = Array.isArray(images) && images.length > 0 ? images[0] : "";
 
+      let timeDisplay = "";
+      if (datetime) {
+        try {
+          const date = new Date(datetime);
+          const month = String(date.getMonth() + 1).padStart(2, "0");
+          const day = String(date.getDate()).padStart(2, "0");
+          const year = String(date.getFullYear()).slice(-2);
+          timeDisplay = `${month}${day}${year}`;
+        } catch (e) {
+          timeDisplay = "";
+        }
+      }
+
+      const remarks = source ? `${source} | ${timeDisplay}` : timeDisplay;
+
       results.push({
         vod_id: vodId,
         vod_name: vodName,
         vod_pic: vodPic || driveInfo.iconUrl,
         type_id: driveType,
         type_name: driveInfo.displayName,
-        vod_remarks: driveInfo.displayName,
-        vod_time: String(item.datetime || item.Datetime || ""),
+        vod_remarks: remarks,
+        vod_time: datetime,
+        _datetime: datetime,
       });
     }
   }

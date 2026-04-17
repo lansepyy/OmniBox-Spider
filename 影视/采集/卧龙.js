@@ -1,5 +1,9 @@
-// @name 采集站模板
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/模板/JavaScript/采集站模板.js
+// @name 卧龙
+// @author lampon
+// @description 
+// @version 1.0.0
+// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/卧龙.js
+
 /**
  * OmniBox 采集站直接爬虫脚本
  *
@@ -40,7 +44,8 @@ const OmniBox = require("omnibox_sdk");
 // ==================== 配置区域 ====================
 // 采集站 API 地址（优先使用环境变量，如果没有则使用默认值）
 // 例如：https://example.com/api.php/provide/vod/
-const SITE_API = process.env.SITE_API || "";
+const SITE_API =
+  process.env.SITE_API || "https://collect.wolongzyw.com/api.php/provide/vod/";
 
 // 弹幕 API 地址（优先使用环境变量，如果没有则使用默认值）
 // 例如：https://danmu.example.com
@@ -62,7 +67,11 @@ async function requestSiteAPI(params = {}) {
   // 构建 URL
   const url = new URL(SITE_API);
   Object.keys(params).forEach((key) => {
-    if (params[key] !== undefined && params[key] !== null && params[key] !== "") {
+    if (
+      params[key] !== undefined &&
+      params[key] !== null &&
+      params[key] !== ""
+    ) {
       url.searchParams.append(key, params[key]);
     }
   });
@@ -73,7 +82,8 @@ async function requestSiteAPI(params = {}) {
     const response = await OmniBox.request(url.toString(), {
       method: "GET",
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
       },
     });
 
@@ -157,7 +167,9 @@ function formatVideos(list) {
         vod_time: String(item.vod_time || item.VodTime || ""),
         vod_play_from: vodPlayFrom,
         vod_play_url: String(item.vod_play_url || item.VodPlayURL || ""),
-        vod_douban_score: String(item.vod_douban_score || item.VodDoubanScore || ""),
+        vod_douban_score: String(
+          item.vod_douban_score || item.VodDoubanScore || "",
+        ),
       };
     })
     .filter((item) => item !== null && item.vod_id);
@@ -197,7 +209,10 @@ function convertToPlaySources(vodPlayFrom, vodPlayUrl, vodId) {
     // 处理线路名称：移除 -vodId 后缀（如果存在）
     let cleanSourceName = sourceName;
     if (vodId && sourceName.endsWith(`-${vodId}`)) {
-      cleanSourceName = sourceName.substring(0, sourceName.length - `-${vodId}`.length);
+      cleanSourceName = sourceName.substring(
+        0,
+        sourceName.length - `-${vodId}`.length,
+      );
     }
 
     // 解析该线路的剧集列表
@@ -288,7 +303,11 @@ function formatDetailVideos(list) {
       const vodPlayUrl = String(item.vod_play_url || item.VodPlayURL || "");
 
       // 转换为新格式的播放源
-      const vodPlaySources = convertToPlaySources(vodPlayFrom, vodPlayUrl, vodId);
+      const vodPlaySources = convertToPlaySources(
+        vodPlayFrom,
+        vodPlayUrl,
+        vodId,
+      );
 
       return {
         vod_id: vodId,
@@ -301,8 +320,11 @@ function formatDetailVideos(list) {
         vod_actor: String(item.vod_actor || item.VodActor || ""),
         vod_director: String(item.vod_director || item.VodDirector || ""),
         vod_content: content,
-        vod_play_sources: vodPlaySources.length > 0 ? vodPlaySources : undefined,
-        vod_douban_score: String(item.vod_douban_score || item.VodDoubanScore || ""),
+        vod_play_sources:
+          vodPlaySources.length > 0 ? vodPlaySources : undefined,
+        vod_douban_score: String(
+          item.vod_douban_score || item.VodDoubanScore || "",
+        ),
       };
     })
     .filter((item) => item !== null && item.vod_id);
@@ -362,7 +384,14 @@ async function enrichVideosWithDetails(videos) {
 
   for (const video of videos) {
     // 检查是否缺少关键信息（图片、年份、评分等）
-    if (!video.vod_pic || video.vod_pic === "<nil>" || !video.vod_year || video.vod_year === "<nil>" || !video.vod_douban_score || video.vod_douban_score === "<nil>") {
+    if (
+      !video.vod_pic ||
+      video.vod_pic === "<nil>" ||
+      !video.vod_year ||
+      video.vod_year === "<nil>" ||
+      !video.vod_douban_score ||
+      video.vod_douban_score === "<nil>"
+    ) {
       videoIDs.push(video.vod_id);
       videoMap.set(video.vod_id, video);
     }
@@ -407,7 +436,9 @@ async function enrichVideosWithDetails(videos) {
               originalVod.vod_year = year;
             }
 
-            const score = String(item.vod_douban_score || item.VodDoubanScore || "");
+            const score = String(
+              item.vod_douban_score || item.VodDoubanScore || "",
+            );
             if (score && score !== "<nil>") {
               originalVod.vod_douban_score = score;
             }
@@ -423,7 +454,9 @@ async function enrichVideosWithDetails(videos) {
               originalVod.vod_time = time;
             }
 
-            const playFrom = String(item.vod_play_from || item.VodPlayFrom || "");
+            const playFrom = String(
+              item.vod_play_from || item.VodPlayFrom || "",
+            );
             if (playFrom && playFrom !== "<nil>") {
               originalVod.vod_play_from = playFrom;
             }
@@ -471,7 +504,10 @@ async function home(params) {
     });
 
     // 如果没有分类数据，尝试单独获取分类
-    if (!response.class || (Array.isArray(response.class) && response.class.length === 0)) {
+    if (
+      !response.class ||
+      (Array.isArray(response.class) && response.class.length === 0)
+    ) {
       try {
         const classResponse = await requestSiteAPI({ ac: "class" });
         if (classResponse.class) {
@@ -664,7 +700,8 @@ async function matchDanmu(fileName) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
       },
       body: JSON.stringify({ fileName: fileName }),
     });
@@ -711,7 +748,10 @@ async function matchDanmu(fileName) {
     // 构建弹幕URL
     const danmakuURL = `${DANMU_API}/api/v2/comment/${episodeId}?format=xml`;
 
-    OmniBox.log("info", `弹幕匹配成功: ${danmakuName} (episodeId: ${episodeId})`);
+    OmniBox.log(
+      "info",
+      `弹幕匹配成功: ${danmakuName} (episodeId: ${episodeId})`,
+    );
 
     return [
       {
@@ -815,7 +855,10 @@ async function play(params) {
     // flag格式：rym3u8-68368 或 68368
     const videoId = extractVideoIdFromFlag(flag);
 
-    OmniBox.log("info", `获取播放地址: playId=${playId}, flag=${flag}, videoId=${videoId}`);
+    OmniBox.log(
+      "info",
+      `获取播放地址: playId=${playId}, flag=${flag}, videoId=${videoId}`,
+    );
 
     // 构建播放地址响应
     // 统一使用数组格式，每个元素包含 name 和 url，类似 danmaku 格式
@@ -875,7 +918,11 @@ async function play(params) {
                   const epURL = parts[1].trim();
 
                   // 匹配当前播放地址
-                  if (epURL === playId || epURL.includes(playId) || playId.includes(epURL)) {
+                  if (
+                    epURL === playId ||
+                    epURL.includes(playId) ||
+                    playId.includes(epURL)
+                  ) {
                     // 尝试从标签中提取集数
                     const digits = extractDigits(epLabel);
                     if (digits) {

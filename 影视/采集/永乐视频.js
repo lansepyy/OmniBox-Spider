@@ -2,7 +2,7 @@
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, cheerio
-// @version 1.0.2
+// @version 1.0.3
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/永乐视频.js
 
 /**
@@ -1150,7 +1150,7 @@ async function search(params) {
     }
 }
 
-async function play(params) {
+async function play(params, context) {
     let playId = params.playId || '';
     logInfo(`准备播放 ID: ${playId}`);
     let url = '';
@@ -1249,16 +1249,15 @@ async function play(params) {
         logError("解析播放地址失败", e);
     }
 
-    const finalUrl = (url && url.startsWith('http')) ? url : playId;
+    let finalUrl = (url && url.startsWith('http')) ? url : playId;
     logInfo(`最终播放地址: ${finalUrl}`);
+    if(context.from != "tvbox") {
+        finalUrl=`${context.baseURL}/api/proxy/proxy.m3u8?url=${finalUrl}`
+    }
 
     let playResponse = {
         urls: [{ name: "极速云", url: finalUrl }],
-        parse: 0,
-        header: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': config.host + '/'
-        }
+        parse: 0
     };
 
     const isDirectPlayable = finalUrl.match(/\.(m3u8|mp4|flv|avi|mkv|ts)(\?|$)/i);

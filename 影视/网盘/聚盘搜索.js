@@ -2,7 +2,7 @@
 // @author 梦
 // @description 站点搜索 + 网盘资源解析（夸克/百度/迅雷等），支持网盘目录展开、刮削、弹幕、观看记录
 // @dependencies: axios
-// @version 1.0.0
+// @version 1.2.3
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/聚盘搜索.js
 
 
@@ -23,9 +23,20 @@ const SEARCH_POLL_INTERVAL_MS = 900;
 // 用法：在搜索结果落地前，先把全部 share_link 汇总成一批，调用一次 pancheck，再过滤无效链接
 const PANCHECK_API = text(process.env.PANCHECK_API || "");
 const PANCHECK_ENABLED = text(process.env.PANCHECK_ENABLED || (PANCHECK_API ? "1" : "0")) === "1";
-const PANCHECK_PLATFORMS = text(process.env.PANCHECK_PLATFORMS || ""); // 例：quark,baidu,xunlei
+const PANCHECK_PLATFORMS = text(process.env.PANCHECK_PLATFORMS || "quark,baidu,uc,pan123,tianyi,cmcc"); // 例：quark,baidu,xunlei 或 quark;baidu;xunlei
+
+// 代理多线路配置：与盘搜分组.js 对齐
+// DRIVE_TYPE_CONFIG：命中的网盘类型才展开代理多线路，支持逗号/分号分隔
+// 例：quark;uc 或 quark,uc
+const DRIVE_TYPE_CONFIG = splitConfigList(process.env.DRIVE_TYPE_CONFIG || "quark;uc").map((s) => s.toLowerCase());
+// SOURCE_NAMES_CONFIG：多线路名称列表，支持逗号/分号分隔；web 端默认会过滤“本地代理”
+// 例：本地代理;服务端代理;直连
+const SOURCE_NAMES_CONFIG = splitConfigList(process.env.SOURCE_NAMES_CONFIG || "本地代理;服务端代理;直连");
 
 // 网盘排序配置（必须置于顶部配置区，便于统一管理）
+// DRIVE_ORDER 支持中文网盘名 / 类型码，支持逗号/分号分隔
+// 例：百度网盘,夸克网盘,迅雷网盘
+// 例：baidu;quark;xunlei
 const DRIVE_ORDER_DEFAULT = "百度网盘,天翼网盘,夸克网盘,UC网盘,115网盘,迅雷网盘,阿里网盘";
 const DRIVE_ORDER_RAW = text(process.env.DRIVE_ORDER || DRIVE_ORDER_DEFAULT);
 
@@ -41,6 +52,13 @@ const http = axios.create({
 
 function text(v) {
   return String(v == null ? "" : v).trim();
+}
+
+function splitConfigList(v) {
+  return text(v)
+    .split(/[;,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function sleep(ms) {
@@ -99,20 +117,50 @@ async function apiGet(path, params = {}) {
  */
 async function checkLinksWithPanCheck(links) {
   if (!PANCHECK_ENABLED || !PANCHECK_API || !Array.isArray(links) || links.length === 0) {
-    return new Set();
+    return {
+      invalidLinksSet: new Set(),
+      stats: null,
+    };
   }
 
   try {
-    const body = { links };
-    if (PANCHECK_PLATFORMS) {
-      const platforms = PANCHECK_PLATFORMS.split(",").map((x) => x.trim()).filter(Boolean);
-      if (platforms.length) body.selected_platforms = platforms;
+    const { selectedPlatforms, linksToCheck, bypassLinks } = splitLinksByPanCheckPlatforms(links);
+    const detectDriveType = (link) => normalizeDriveType("", link) || "unknown";
+    const inputPlatformStats = {};
+
+    for (const link of links) {
+      const driveType = detectDriveType(link);
+      inputPlatformStats[driveType] = (inputPlatformStats[driveType] || 0) + 1;
     }
+
+    if (linksToCheck.length === 0) {
+      await OmniBox.log("info", `[dyuzi] PanCheck 跳过: 未命中待校验平台, 跳过链接数量=${bypassLinks.length}`);
+      return {
+        invalidLinksSet: new Set(),
+        stats: {
+          selectedPlatforms,
+          inputPlatformStats,
+          checkedPlatformStats: {},
+          invalidPlatformStats: {},
+          validPlatformStats: {},
+          bypassPlatformStats: inputPlatformStats,
+          totalInput: links.length,
+          totalChecked: 0,
+          totalInvalid: 0,
+          totalValid: 0,
+          totalBypass: bypassLinks.length,
+          totalOutput: links.length,
+        },
+      };
+    }
+
+    const body = { links: linksToCheck };
+    if (selectedPlatforms.length) body.selected_platforms = selectedPlatforms;
 
     const apiUrl = PANCHECK_API.replace(/\/$/, "");
     const checkURL = `${apiUrl}/api/v1/links/check`;
 
-    await OmniBox.log("info", `[dyuzi] PanCheck 开始，链接数=${links.length}, url=${checkURL}`);
+    await OmniBox.log("info", `[dyuzi] PanCheck 开始，总链接=${links.length}, 待校验=${linksToCheck.length}, 跳过=${bypassLinks.length}, 平台=${selectedPlatforms.join(",") || "全部"}, url=${checkURL}`);
     const res = await OmniBox.request(checkURL, {
       method: "POST",
       headers: {
@@ -124,16 +172,60 @@ async function checkLinksWithPanCheck(links) {
 
     if (res.statusCode !== 200) {
       await OmniBox.log("warn", `[dyuzi] PanCheck 状态码异常 status=${res.statusCode}`);
-      return new Set();
+      return {
+        invalidLinksSet: new Set(),
+        stats: null,
+      };
     }
 
     const data = safeJson(res.body, {});
     const invalid = Array.isArray(data.invalid_links) ? data.invalid_links : [];
-    await OmniBox.log("info", `[dyuzi] PanCheck 完成，无效链接数=${invalid.length}`);
-    return new Set(invalid.map((x) => String(x)));
+    const valid = Array.isArray(data.valid_links) ? data.valid_links : [];
+    const invalidLinksSet = new Set(invalid.map((x) => String(x)));
+    const checkedPlatformStats = {};
+    const invalidPlatformStats = {};
+    const validPlatformStats = {};
+    const bypassPlatformStats = {};
+
+    for (const link of linksToCheck) {
+      const driveType = detectDriveType(link);
+      checkedPlatformStats[driveType] = (checkedPlatformStats[driveType] || 0) + 1;
+      if (invalidLinksSet.has(String(link))) {
+        invalidPlatformStats[driveType] = (invalidPlatformStats[driveType] || 0) + 1;
+      } else {
+        validPlatformStats[driveType] = (validPlatformStats[driveType] || 0) + 1;
+      }
+    }
+
+    for (const link of bypassLinks) {
+      const driveType = detectDriveType(link);
+      bypassPlatformStats[driveType] = (bypassPlatformStats[driveType] || 0) + 1;
+    }
+
+    await OmniBox.log("info", `[dyuzi] PanCheck 完成，有效链接数=${valid.length}, 无效链接数=${invalid.length}, 未校验直出=${bypassLinks.length}`);
+    return {
+      invalidLinksSet,
+      stats: {
+        selectedPlatforms,
+        inputPlatformStats,
+        checkedPlatformStats,
+        invalidPlatformStats,
+        validPlatformStats,
+        bypassPlatformStats,
+        totalInput: links.length,
+        totalChecked: linksToCheck.length,
+        totalInvalid: invalid.length,
+        totalValid: valid.length,
+        totalBypass: bypassLinks.length,
+        totalOutput: (links.length - invalid.length),
+      },
+    };
   } catch (e) {
     await OmniBox.log("warn", `[dyuzi] PanCheck 调用失败: ${e.message}`);
-    return new Set();
+    return {
+      invalidLinksSet: new Set(),
+      stats: null,
+    };
   }
 }
 
@@ -240,11 +332,14 @@ async function resolveResource(inputId) {
 function driveFromLink(link) {
   const u = text(link).toLowerCase();
   if (!u) return "";
-  if (u.includes("pan.quark.cn")) return "quark";
+  if (u.includes("pan.quark.cn") || u.includes("drive.quark.cn")) return "quark";
   if (u.includes("pan.baidu.com")) return "baidu";
   if (u.includes("pan.xunlei.com")) return "xunlei";
-  if (u.includes("drive.uc.cn") || u.includes("uc.cn")) return "uc";
-  if (u.includes("aliyundrive.com")) return "aliyun";
+  if (u.includes("drive.uc.cn") || u.includes("fast.uc.cn") || u.includes("uc.cn")) return "uc";
+  if (u.includes("aliyundrive.com") || u.includes("alipan.com")) return "aliyun";
+  if (u.includes("cloud.189.cn")) return "tianyiyun";
+  if (u.includes("yun.139.com")) return "cmcc";
+  if (u.includes("123684.com") || u.includes("123865.com") || u.includes("123912.com") || u.includes("123pan.com")) return "pan123";
   return "";
 }
 
@@ -254,13 +349,15 @@ function driveAliasToCode(input) {
 
   const map = {
     "百度网盘": "baidu", "baidu": "baidu",
-    "天翼网盘": "tianyiyun", "tianyiyun": "tianyiyun",
+    "天翼网盘": "tianyiyun", "天翼": "tianyiyun", "tianyi": "tianyiyun", "tianyiyun": "tianyiyun",
     "夸克网盘": "quark", "quark": "quark",
     "uc网盘": "uc", "uc": "uc",
     "115网盘": "115", "115": "115",
     "迅雷网盘": "xunlei", "xunlei": "xunlei",
     "阿里网盘": "aliyun", "阿里云盘": "aliyun",
-    "aliyun": "aliyun", "aliyundrive": "aliyun"
+    "aliyun": "aliyun", "aliyundrive": "aliyun", "ali": "aliyun", "alipan": "aliyun",
+    "移动云盘": "cmcc", "移动": "cmcc", "cmcc": "cmcc", "mobile": "cmcc", "139": "cmcc",
+    "123网盘": "pan123", "123pan": "pan123", "pan123": "pan123", "123": "pan123"
   };
 
   return map[input] || map[v] || v;
@@ -283,6 +380,21 @@ function driveLabel(driveType) {
   return text(driveType); // 未知类型原样透传
 }
 
+function driveShortLabel(driveType) {
+  const d = text(driveType).toLowerCase();
+  if (!d) return "网盘";
+  if (d === "baidu") return "百度";
+  if (d === "tianyiyun") return "天翼";
+  if (d === "quark") return "夸克";
+  if (d === "uc") return "UC";
+  if (d === "115") return "115";
+  if (d === "xunlei") return "迅雷";
+  if (d === "aliyun" || d === "aliyundrive") return "阿里";
+  if (d === "cmcc") return "移动";
+  if (d === "pan123") return "123";
+  return text(driveType);
+}
+
 /**
  * 将 drive_type 字段或链接归一化为小写内部类型码（供排序使用）
  * 例：aliyundrive → aliyun；空值从 share_link 推断
@@ -293,11 +405,51 @@ function normalizeDriveType(driveTypeRaw, link) {
   return driveAliasToCode(driveFromLink(link || ""));
 }
 
+function getPanCheckSelectedPlatforms() {
+  return splitConfigList(PANCHECK_PLATFORMS)
+    .map((x) => driveAliasToCode(x))
+    .filter(Boolean);
+}
+
+function splitLinksByPanCheckPlatforms(links = []) {
+  const allLinks = Array.isArray(links) ? links.filter(Boolean) : [];
+  const selectedPlatforms = getPanCheckSelectedPlatforms();
+
+  if (selectedPlatforms.length === 0) {
+    return {
+      selectedPlatforms: [],
+      linksToCheck: allLinks,
+      bypassLinks: [],
+    };
+  }
+
+  const selectedPlatformSet = new Set(selectedPlatforms);
+  const linksToCheck = [];
+  const bypassLinks = [];
+
+  for (const link of allLinks) {
+    const driveType = normalizeDriveType("", link);
+    if (selectedPlatformSet.has(driveType)) {
+      linksToCheck.push(link);
+    } else {
+      bypassLinks.push(link);
+    }
+  }
+
+  return {
+    selectedPlatforms,
+    linksToCheck,
+    bypassLinks,
+  };
+}
+
 /**
  * 解析环境变量 DRIVE_ORDER → 网盘类型码数组
  * 默认顺序：百度 → 天翼 → 夸克 → UC → 115 → 迅雷 → 阿里
+ * 支持中文网盘名 / 类型码，支持逗号/分号分隔
  * 配置示例：DRIVE_ORDER=夸克网盘,百度网盘,迅雷网盘
  *           DRIVE_ORDER=quark,baidu,xunlei
+ *           DRIVE_ORDER=quark;baidu;xunlei
  */
 function parseDriveOrderEnv() {
   const DEFAULT_ORDER = ["baidu", "tianyiyun", "quark", "uc", "115", "xunlei", "aliyun"];
@@ -305,7 +457,7 @@ function parseDriveOrderEnv() {
   if (!raw) return DEFAULT_ORDER;
 
   const out = [];
-  for (const part of raw.split(",").map(x => x.trim()).filter(Boolean)) {
+  for (const part of splitConfigList(raw)) {
     const code = driveAliasToCode(part);
     if (code && !out.includes(code)) out.push(code);
   }
@@ -522,9 +674,13 @@ async function search(params, context) {
       const links = extractLinksFromItems(items);
       await OmniBox.log("info", `[search] PanCheck 预校验链接数=${links.length}`);
       if (links.length > 0) {
-        const invalidSet = await checkLinksWithPanCheck(links);
+        const { invalidLinksSet, stats } = await checkLinksWithPanCheck(links);
         const before = items.length;
-        items = filterInvalidItems(items, invalidSet);
+        items = filterInvalidItems(items, invalidLinksSet);
+        if (stats) {
+          await OmniBox.log("info", `[search] PanCheck 分平台统计: 输入=${JSON.stringify(stats.inputPlatformStats)}, 校验=${JSON.stringify(stats.checkedPlatformStats)}, 过滤=${JSON.stringify(stats.invalidPlatformStats)}, 剩余=${JSON.stringify(stats.validPlatformStats)}, 跳过=${JSON.stringify(stats.bypassPlatformStats)}`);
+          await OmniBox.log("info", `[search] PanCheck 总统计: 总输入=${stats.totalInput}, 总校验=${stats.totalChecked}, 总过滤=${stats.totalInvalid}, 总剩余=${stats.totalOutput}, 其中直出=${stats.totalBypass}`);
+        }
         await OmniBox.log("info", `[search] PanCheck 过滤完成 before=${before}, after=${items.length}, removed=${before - items.length}`);
       }
     } catch (e) {
@@ -703,9 +859,13 @@ async function detail(params, context) {
       try {
         const links = candidates.map((c) => text(c.share_link || c.link || "")).filter(Boolean);
         await OmniBox.log("info", `[detail] PanCheck 开始，链接数=${links.length}`);
-        const invalidSet = await checkLinksWithPanCheck(links);
+        const { invalidLinksSet, stats } = await checkLinksWithPanCheck(links);
         const before = candidates.length;
-        candidates = candidates.filter((c) => !invalidSet.has(text(c.share_link || c.link || "")));
+        candidates = candidates.filter((c) => !invalidLinksSet.has(text(c.share_link || c.link || "")));
+        if (stats) {
+          await OmniBox.log("info", `[detail] PanCheck 分平台统计: 输入=${JSON.stringify(stats.inputPlatformStats)}, 校验=${JSON.stringify(stats.checkedPlatformStats)}, 过滤=${JSON.stringify(stats.invalidPlatformStats)}, 剩余=${JSON.stringify(stats.validPlatformStats)}, 跳过=${JSON.stringify(stats.bypassPlatformStats)}`);
+          await OmniBox.log("info", `[detail] PanCheck 总统计: 总输入=${stats.totalInput}, 总校验=${stats.totalChecked}, 总过滤=${stats.totalInvalid}, 总剩余=${stats.totalOutput}, 其中直出=${stats.totalBypass}`);
+        }
         await OmniBox.log("info", `[detail] PanCheck 过滤完成 before=${before}, after=${candidates.length}, removed=${before - candidates.length}`);
       } catch (e) {
         await OmniBox.log("warn", `[detail] PanCheck 过滤失败，回退: ${e.message}`);
@@ -787,7 +947,7 @@ async function detail(params, context) {
     const baseNameShareCount = new Map(); // baseName -> Set<shareURL>
     for (const prep of preparedList) {
       if (!prep) continue;
-      const driveLabelName = driveLabel(prep.driveType);
+      const driveLabelName = driveShortLabel(prep.driveType);
       const set = baseNameShareCount.get(driveLabelName) || new Set();
       set.add(prep.shareURL);
       baseNameShareCount.set(driveLabelName, set);
@@ -799,7 +959,7 @@ async function detail(params, context) {
     for (const prep of preparedList) {
       if (!prep) continue;
       const { candidate, driveType, shareURL, videoFiles, scrapeData: cScrapeData, mappingMap: cMappingMap } = prep;
-      const driveLabelName = driveLabel(driveType);
+      const driveLabelName = driveShortLabel(driveType);
 
       // 确定序号：同 baseName 有多个不同 shareURL 时才加序号
       const needIndex = (baseNameShareCount.get(driveLabelName)?.size || 0) > 1;
@@ -807,18 +967,19 @@ async function detail(params, context) {
       if (needIndex) baseNameIndexMap.set(driveLabelName, idx);
       const labelWithIdx = needIndex ? `${driveLabelName}${idx}` : driveLabelName;
 
-      // 无视频文件退化为原始链接
+      // 无视频文件时直接排除：这类候选通常是目录展开失败、分享失效或当前链路无法拿到有效视频文件
       if (!videoFiles.length) {
-        const simplePlayId = b64Encode({ mode: "raw_link", shareURL, title: primaryTitle, epName: "播放", driveType, sourceVodId: vodId });
-        playSources.push({ name: labelWithIdx, episodes: [{ name: "播放", playId: simplePlayId }] });
+        await OmniBox.log("warn", `[detail] 排除无有效视频文件候选 drive=${driveType}, url=${shareURL.substring(0, 60)}`);
         continue;
       }
 
-      // 子线路名（夸克/UC 展开多线路，序号在前缀，后缀在末尾）
-      let sourceNames = [labelWithIdx];
-      if (driveType === "quark" || driveType === "uc") {
-        sourceNames = [`${labelWithIdx}-服务端`, `${labelWithIdx}-本地`, `${labelWithIdx}-直连`];
-        if (context?.from === "web") sourceNames = sourceNames.filter((x) => !x.includes("本地"));
+      // 子线路名：与盘搜分组.js 对齐，匹配 DRIVE_TYPE_CONFIG 时才展开 SOURCE_NAMES_CONFIG
+      let sourceNames = ["直连"];
+      if (DRIVE_TYPE_CONFIG.includes(driveType)) {
+        sourceNames = [...SOURCE_NAMES_CONFIG];
+        if (context?.from === "web") {
+          sourceNames = sourceNames.filter((x) => x !== "本地代理");
+        }
       }
 
       for (const sourceName of sourceNames) {
@@ -858,7 +1019,13 @@ async function detail(params, context) {
           });
         }
         for (const ep of episodes) { delete ep._season; delete ep._episode; }
-        if (episodes.length) playSources.push({ name: sourceName, episodes });
+        if (episodes.length) {
+          let finalSourceName = labelWithIdx;
+          if (DRIVE_TYPE_CONFIG.includes(driveType)) {
+            finalSourceName = `${labelWithIdx}-${sourceName}`;
+          }
+          playSources.push({ name: finalSourceName, episodes });
+        }
       }
     }
 
@@ -912,7 +1079,16 @@ async function play(params, context) {
       throw new Error("无效播放参数：缺少 shareURL 或 fid");
     }
 
-    const info = await OmniBox.getDriveVideoPlayInfo(shareURL, fid, flag);
+    let routeType = context?.from === "web" ? "服务端代理" : "直连";
+    if (flag) {
+      if (flag.includes("-")) {
+        const parts = flag.split("-");
+        routeType = parts[parts.length - 1];
+      } else {
+        routeType = flag;
+      }
+    }
+    const info = await OmniBox.getDriveVideoPlayInfo(shareURL, fid, routeType);
 
     const urls = [];
     if (Array.isArray(info?.url)) {
@@ -969,22 +1145,28 @@ async function play(params, context) {
     }
 
     // 观看记录（可选）
-    try {
-      await OmniBox.addPlayHistory({
-        vodId: text(meta.sourceVodId || resourceId || title),
-        title: title,
-        episode: playId,
-        episodeName: epName || undefined,
-        playUrl: urls[0].url,
-        playHeader: info?.header || { "User-Agent": UA, "Referer": `${BASE}/` }
+    Promise.resolve(OmniBox.addPlayHistory({
+      vodId: text(meta.sourceVodId || resourceId || title),
+      title: title,
+      episode: playId,
+      episodeName: epName || undefined,
+      playUrl: urls[0].url,
+      playHeader: info?.header || { "User-Agent": UA, "Referer": `${BASE}/` }
+    }))
+      .then(async (added) => {
+        if (added) {
+          await OmniBox.log("info", `[dyuzi] 已添加观看记录: ${title}`);
+        } else {
+          await OmniBox.log("info", `[dyuzi] 观看记录未写入(返回 falsy): ${title}`);
+        }
+      })
+      .catch(async (e) => {
+        await OmniBox.log("warn", `[dyuzi] 添加观看记录失败: ${e.message}`);
       });
-    } catch (e) {
-      await OmniBox.log("warn", `[dyuzi] 添加观看记录失败: ${e.message}`);
-    }
 
     return {
       urls,
-      flag: shareURL,
+      flag: routeType,
       header: info?.header || { "User-Agent": UA, "Referer": `${BASE}/` },
       parse: 0,
       danmaku: Array.isArray(danmaku) ? danmaku : []

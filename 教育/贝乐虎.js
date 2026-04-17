@@ -173,65 +173,8 @@ async function category(params) {
 
 async function search(params) {
   const keyword = params.keyword || params.wd || "";
-  const pg = parseInt(params.page) || 1;
-  if (!keyword) {
-    return { list: [], page: pg, pagecount: 1 };
-  }
-
-  try {
-    const allResults = [];
-
-    try {
-      const data = await fetchVideos("56", pg, keyword);
-      if (data?.result?.items) {
-        allResults.push(...formatVideoList(data.result.items));
-      }
-    } catch (error) {
-      logError("搜索方法1失败", error);
-    }
-
-    if (allResults.length < 10) {
-      const mainCategories = ["57", "58", "59"]; // 儿歌、故事、动画
-      for (const cateId of mainCategories) {
-        try {
-          const data = await fetchVideos(cateId, pg);
-          if (data?.result?.items) {
-            const filtered = data.result.items.filter(
-              (item) => item.title && item.title.includes(keyword)
-            );
-            if (filtered.length > 0) {
-              allResults.push(...formatVideoList(filtered));
-            }
-          }
-        } catch (error) {
-          logError(`分类${cateId}搜索失败`, error);
-        }
-
-        if (allResults.length >= PAGE_LIMIT) break;
-      }
-    }
-
-    const uniqueResults = [];
-    const titleSet = new Set();
-    allResults.forEach((item) => {
-      if (!titleSet.has(item.vod_name)) {
-        titleSet.add(item.vod_name);
-        uniqueResults.push(item);
-      }
-    });
-
-    const startIndex = (pg - 1) * PAGE_LIMIT;
-    const paginatedResults = uniqueResults.slice(startIndex, startIndex + PAGE_LIMIT);
-
-    return {
-      list: paginatedResults,
-      page: pg,
-      pagecount: Math.ceil(uniqueResults.length / PAGE_LIMIT) || 1,
-    };
-  } catch (error) {
-    logError("搜索错误", error);
-    return { list: [], page: pg, pagecount: 1 };
-  }
+  OmniBox.log("info", `[贝乐虎] 搜索功能未实现，关键词: ${keyword}`);
+  return { list: [], page: 1, pagecount: 1 };
 }
 
 async function detail(params) {

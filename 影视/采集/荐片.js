@@ -1,7 +1,7 @@
 // @name 荐片APP
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
-// @version 1.0.4
+// @version 1.0.5
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/荐片.js
 /**
  * ============================================================================
@@ -698,7 +698,8 @@ function convertToPlaySources(sourceListSource, vodId, vodName = "") {
       const episodes = source.source_list.map((item, index) => {
         const episodeName = item.source_name || `第${index + 1}集`;
         const fid = `${vodId}#${source.name || "线路"}#${index}`;
-        const playId = `${item.url}|||${encodeMeta({ sid: vodId, fid, v: vodName || "", e: episodeName })}`;
+        const safeUrl = encodeURIComponent(item.url || "");
+        const playId = `${safeUrl}|||${encodeMeta({ sid: vodId, fid, v: vodName || "", e: episodeName })}`;
         return {
           name: episodeName,
           playId
@@ -874,9 +875,12 @@ const getDetail = async (ids) => {
  * @param {string} playId - 播放地址
  * @returns {Object} 播放信息
  */
-const handlePlay = async (playId, vodId = "") => {
+const handlePlay = async (playId, vodId = "", context = {}) => {
   try {
     logInfo('处理播放请求', { url: playId.substring(0, 50) + '...' });
+
+    const from = context?.from || "web";
+    const isWeb = from === "web";
 
     let rawPlayId = playId;
     let playMeta = {};
@@ -891,6 +895,12 @@ const handlePlay = async (playId, vodId = "") => {
       vodName = playMeta.v || "";
       episodeName = playMeta.e || "";
       logInfo(`解析透传信息 - 视频: ${vodName}, 集数: ${episodeName}`);
+    }
+
+    try {
+      rawPlayId = decodeURIComponent(rawPlayId || "");
+    } catch (error) {
+      logInfo(`playId 解码失败，按原值继续: ${error.message}`);
     }
 
     let scrapedDanmuFileName = "";
@@ -919,19 +929,25 @@ const handlePlay = async (playId, vodId = "") => {
       return {
         urls: [{ name: "直接播放", url: rawPlayId }],
         parse: 0,
-        header: PLAY_HEADERS
+        header: isWeb ? {} : PLAY_HEADERS
       };
     }
 
     const sniffResult = await sniffJianpianPlay(rawPlayId);
     if (sniffResult) {
+      if (isWeb) {
+        return {
+          ...sniffResult,
+          header: {}
+        };
+      }
       return sniffResult;
     }
 
     return {
       urls: [{ name: "播放", url: rawPlayId }],
       parse: 1,
-      header: PLAY_HEADERS
+      header: isWeb ? {} : PLAY_HEADERS
     };
   } catch (e) {
     logError('处理播放失败', e);
@@ -1103,7 +1119,7 @@ async function search(params) {
  *   - flag: 播放源标识(可选)
  * @returns {Object} 返回播放地址信息
  */
-async function play(params) {
+async function play(params, context) {
   try {
     const playId = params.playId;
     const vodId = params.vodId || "";
@@ -1114,7 +1130,7 @@ async function play(params) {
 
     logInfo(`获取播放地址: playId=${playId}`);
 
-    return await handlePlay(playId, vodId);
+    return await handlePlay(playId, vodId, context);
   } catch (error) {
     logError('获取播放地址失败', error);
     return {

@@ -1,9 +1,9 @@
 // @name 瓜子APP
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
-// @version 1.0.5
+// @version 1.0.7
 // @dependencies: axios, crypto
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/%E5%BD%B1%E8%A7%86/%E9%87%87%E9%9B%86/%E7%93%9C%E5%AD%90.js
+// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/瓜子.js
 
 /**
  * ============================================================================
@@ -1153,7 +1153,7 @@ async function play(params) {
             logWarn(`读取刮削元数据失败: ${e.message}`);
         }
 
-        logInfo('获取播放地址', { playId: playId.substring(0, 50) + '...' });
+        logInfo('获取播放地址', { playId: playId });
 
         const parts = playId.split('||');
         let playResponse;
@@ -1181,10 +1181,11 @@ async function play(params) {
 
             const playUrl = data?.url || '';
             
-            logInfo('播放地址获取成功', { url: playUrl.substring(0, 50) + '...' });
+            logInfo('播放地址获取成功', { url: playUrl });
 
             playResponse = {
                 urls: [{ name: '播放', url: playUrl }],
+                // header:config.headers,
                 parse: 0
             };
         }

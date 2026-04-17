@@ -2,8 +2,8 @@
 // @author 梦
 // @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：更贴近官网
 // @dependencies: axios, cheerio
-// @version 1.6.0
-// @downloadURL https://www.ppnix.com/cn/
+// @version 1.6.1
+// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/PPnix.js
 
 const OmniBox = require("omnibox_sdk");
 const cheerio = require("cheerio");
@@ -474,7 +474,7 @@ async function play(params, context) {
       urls: [{ name: episodeName, url: sourceUrl }],
       flag: "PPnix",
       header,
-      parse: 1,
+      parse: 0,
       danmaku: [],
       subtitles,
     };

@@ -2,7 +2,7 @@
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios
-// @version 1.0.3
+// @version 1.0.4
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/RRSP.js
 
 
@@ -64,7 +64,8 @@ const fixPicUrl = (url) => {
 const proxyImageDomains = new Set([
     'img1.doubanio.com',
     'img2.doubanio.com',
-    'img3.doubanio.com'
+    'img3.doubanio.com',
+    'img9.doubanio.com'
 ]);
 
 const processImageUrl = (imageUrl, baseURL = '') => {

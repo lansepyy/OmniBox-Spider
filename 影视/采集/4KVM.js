@@ -2,7 +2,7 @@
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, cheerio
-// @version 1.1.1
+// @version 1.2.3
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/4KVM.js
 
 /**
@@ -146,6 +146,7 @@ const normalizeUrl = (url) => {
 const extractVideoBasic = ($item) => {
     try {
         const link = normalizeUrl(
+            $item.find('a[href*="/play/"]').first().attr('href') ||
             $item.find('a').attr('href') ||
             $item.find('h3 a').attr('href') ||
             $item.find('.data h3 a').attr('href')
@@ -154,7 +155,7 @@ const extractVideoBasic = ($item) => {
         if (!link) return null;
 
         const title = (
-            $item.find('h3').text().trim() ||
+            $item.find('h3').first().text().trim() ||
             $item.find('.data h3').text().trim() ||
             $item.find('img').attr('alt') ||
             $item.find('a').attr('title') ||
@@ -162,11 +163,13 @@ const extractVideoBasic = ($item) => {
         );
 
         const img = normalizeUrl(
-            $item.find('img').attr('src') ||
-            $item.find('img').attr('data-src')
+            $item.find('img').attr('data-src') ||
+            $item.find('img').attr('src')
         );
 
         const remarks = (
+            $item.find('.absolute.bottom-0 span').last().text().trim() ||
+            $item.find('.text-xs.text-gray-400').last().text().trim() ||
             $item.find('.rating, .imdb, .vote').text().trim() ||
             $item.find('.year, .date, span').text().trim() ||
             $item.find('.type, .genre, .tag').text().trim() ||
@@ -188,7 +191,7 @@ const extractVideoBasic = ($item) => {
 /**
 * 获取视频列表
 */
-const getVideoList = ($, selector = 'article, .items article, .content article') => {
+const getVideoList = ($, selector = '.movie-card, article, .items article, .content article') => {
     const videos = [];
     $(selector).each((_, element) => {
         const videoInfo = extractVideoBasic($(element));
@@ -196,6 +199,42 @@ const getVideoList = ($, selector = 'article, .items article, .content article')
             videos.push(videoInfo);
         }
     });
+    return videos;
+};
+
+const getSearchVideoList = ($) => {
+    const videos = [];
+    const seen = new Set();
+
+    $('a[href^="/play/"]').each((_, element) => {
+        const $a = $(element);
+        const href = normalizeUrl($a.attr('href'));
+        if (!href || seen.has(href)) return;
+
+        const title = (
+            $a.find('h3').first().text().trim() ||
+            $a.find('img').attr('alt') ||
+            $a.attr('title') ||
+            ''
+        );
+        if (!title) return;
+
+        const pic = normalizeUrl($a.find('img').attr('data-src') || $a.find('img').attr('src'));
+        const remarks = (
+            $a.find('.absolute.top-2.right-2').text().trim() ||
+            $a.find('.absolute.bottom-0 p').text().trim() ||
+            ''
+        );
+
+        seen.add(href);
+        videos.push({
+            vod_id: href,
+            vod_name: title,
+            vod_pic: pic || '',
+            vod_remarks: remarks,
+        });
+    });
+
     return videos;
 };
 
@@ -412,6 +451,43 @@ const buildSeasonPlaySources = (seasonSources, vodName, videoId = "") => {
             episodes: episodes
         };
     }).filter(source => (source.episodes || []).length > 0);
+};
+
+const extractEpisodePlaySources = ($, vodName, videoId = "") => {
+    const sourcesMap = new Map();
+
+    $('.episode-link[data-line][data-episode]').each((_, element) => {
+        const $el = $(element);
+        const line = String($el.attr('data-line') || '1');
+        const episodeNo = String($el.attr('data-episode') || '').trim();
+        const dataId = String($el.attr('dataid') || '').trim();
+        const href = normalizeUrl($el.attr('href') || '');
+        const rawName = $el.find('span').last().text().trim() || episodeNo || '播放';
+        const episodeName = /^\d+$/.test(rawName) ? `第${rawName}集` : rawName;
+        if (!href) return;
+
+        const sourceName = `线路${line}`;
+        if (!sourcesMap.has(sourceName)) {
+            sourcesMap.set(sourceName, []);
+        }
+
+        const fid = dataId || `${videoId}#${line}#${episodeNo || sourcesMap.get(sourceName).length + 1}`;
+        const combinedId = `${href}|||${encodeMeta({ sid: String(videoId || ""), fid, v: vodName || "", e: episodeName })}`;
+        sourcesMap.get(sourceName).push({
+            name: episodeName,
+            playId: combinedId,
+            _fid: fid,
+            _rawName: rawName || episodeName,
+            _episodeNumber: Number(episodeNo) || undefined,
+        });
+    });
+
+    const sources = [];
+    for (const [name, episodes] of sourcesMap.entries()) {
+        episodes.sort((a, b) => Number(a._episodeNumber || 0) - Number(b._episodeNumber || 0));
+        sources.push({ name, episodes });
+    }
+    return sources;
 };
 /**
 * 过滤电视剧内容
@@ -703,39 +779,20 @@ async function home(params) {
         const response = await axiosInstance.get(config.host, { headers: config.headers });
         const $ = cheerio.load(response.data);
 
-        // 提取分类
         const classes = [];
-        $('header .head-main-nav ul.main-header > li').each((_, element) => {
+        const seen = new Set();
+        $('nav a.nav-item').each((_, element) => {
             const $el = $(element);
-            const mainLink = $el.children('a').eq(0);
-            const link = mainLink.attr('href');
-            const name = mainLink.text().trim();
-
-            if (link && name && !['首页', '影片下载'].includes(name)) {
-                const normalizedLink = normalizeUrl(link);
-                classes.push({
-                    type_id: normalizedLink,
-                    type_name: name
-                });
-
-                // 提取子分类
-                $el.find('ul li').each((_, subElement) => {
-                    const $sub = $(subElement);
-                    const subLink = normalizeUrl($sub.find('a').attr('href'));
-                    const subName = $sub.find('a').text().trim();
-
-                    if (subLink && subName && !subLink.includes('/seasons/')) {
-                        classes.push({
-                            type_id: subLink,
-                            type_name: `${name}-${subName}`
-                        });
-                    }
-                });
-            }
+            const link = normalizeUrl($el.attr('href'));
+            const name = $el.text().trim();
+            if (!link || !name || ['首页', '影片下载', '片单'].includes(name)) return;
+            if (!/^https?:\/\/www\.4kvm\.org\/(movie|tv|anime|filter)/.test(link)) return;
+            if (seen.has(link)) return;
+            seen.add(link);
+            classes.push({ type_id: link, type_name: name });
         });
 
-        // 获取首页推荐列表
-        const homeList = getVideoList($, 'article, .module .content .items .item, .movies-list article');
+        const homeList = getVideoList($, '.movie-card');
 
         logInfo(`分类获取完成,共 ${classes.length} 个`);
 
@@ -747,10 +804,10 @@ async function home(params) {
         logError("首页获取失败", error);
         return {
             class: [
-                { 'type_id': `${config.host}/movies/`, 'type_name': '电影' },
-                { 'type_id': `${config.host}/tvshows/`, 'type_name': '电视剧' },
-                { 'type_id': `${config.host}/genre/dongzuo/`, 'type_name': '动作' },
-                { 'type_id': `${config.host}/genre/xiju/`, 'type_name': '喜剧' }
+                { 'type_id': `${config.host}/movie`, 'type_name': '电影' },
+                { 'type_id': `${config.host}/tv`, 'type_name': '电视剧' },
+                { 'type_id': `${config.host}/anime`, 'type_name': '动漫' },
+                { 'type_id': `${config.host}/filter`, 'type_name': '筛选' }
             ],
             list: []
         };
@@ -770,16 +827,15 @@ async function category(params) {
         if (pg > 1) {
             url = categoryId.includes('?')
                 ? `${categoryId}&page=${pg}`
-                : `${categoryId}/page/${pg}`;
+                : `${categoryId}?page=${pg}`;
         }
 
         const response = await axiosInstance.get(url, { headers: config.headers });
         const $ = cheerio.load(response.data);
 
-        let videoList = getVideoList($);
+        let videoList = getVideoList($, '.movie-card');
 
-        // 如果是电视剧分类,过滤电影
-        if (categoryId.includes('电视剧') || categoryId.includes('tvshows')) {
+        if (categoryId.includes('/tv')) {
             videoList = filterTVShowsOnly(videoList);
         }
 
@@ -788,7 +844,7 @@ async function category(params) {
         return {
             list: videoList,
             page: pg,
-            pagecount: 9999
+            pagecount: videoList.length > 0 ? pg + 1 : pg
         };
     } catch (error) {
         logError("分类请求失败", error);
@@ -807,51 +863,64 @@ async function detail(params) {
         const response = await axiosInstance.get(videoId, { headers: config.headers });
         const $ = cheerio.load(response.data);
 
+        const detailMap = {};
+        $('.grid .text-gray-500').each((_, el) => {
+            const key = $(el).text().trim();
+            const value = $(el).next('div').text().trim();
+            if (key && value) detailMap[key] = value;
+        });
+
+        const metaDesc = $('meta[name="description"]').attr('content') || '';
+        const metaPic = $('meta[property="og:image"]').attr('content') || '';
+        const metaKeywords = $('meta[name="keywords"]').attr('content') || '';
+        const keywordParts = metaKeywords.split(',').map((s) => s.trim()).filter(Boolean);
+
         const vod = {
             vod_id: videoId,
-            vod_name: $('.sheader h1, h1').first().text().trim() || '未知标题',
-            vod_pic: normalizeUrl($('.sheader .poster img, .poster img').first().attr('src')),
-            vod_content: $('.sbox .wp-content, #info .wp-content').first().text().trim(),
-            vod_year: '',
-            vod_area: '',
-            vod_remarks: '',
-            vod_actor: '',
-            vod_director: ''
+            vod_name: $('h1.text-xl, h1').first().text().trim() || $('meta[property="og:title"]').attr('content')?.replace(/\s*-\s*第\d+集.*$/, '') || '未知标题',
+            vod_pic: normalizeUrl($('.video-player').attr('data-poster') || $('.video-player img').attr('src') || metaPic),
+            vod_content: $('.bg-dark-800 p.text-xs.text-gray-300.leading-relaxed').first().text().trim() || metaDesc.trim(),
+            vod_year: detailMap['年份'] || '',
+            vod_area: detailMap['地区'] || detailMap['国家/地区'] || '',
+            vod_remarks: detailMap['状态'] || $('.text-xs.text-gray-500').filter((_, el) => $(el).text().includes('更新')).first().text().trim() || '',
+            vod_actor: detailMap['主演'] || '',
+            vod_director: detailMap['导演'] || ''
         };
 
-        // 提取分类
         const genres = [];
-        $('.sgeneros a').each((_, el) => {
-            genres.push($(el).text().trim());
-        });
+        if (detailMap['类型']) genres.push(...detailMap['类型'].split('/').map((s) => s.trim()).filter(Boolean));
+        if (genres.length === 0 && keywordParts.length > 1) {
+            const maybeType = keywordParts.filter((s) => !/^\d+(\.\d+)?$/.test(s) && s !== vod.vod_name && s !== vod.vod_director);
+            if (maybeType.length > 0) genres.push(maybeType[0]);
+        }
         if (genres.length > 0) {
             vod.type_name = genres.join(', ');
         }
 
         logInfo(`视频标题: ${vod.vod_name}`);
 
-        // 获取播放链接
+        // 获取播放链接：优先使用新前端已渲染好的选集锚点
         let playLinks = extractPlayOptions($, videoId);
         let seasonSources = [];
+        const videoIdForScrape = String(videoId || "");
+        let playSources = extractEpisodePlaySources($, vod.vod_name, videoIdForScrape);
 
-        // 如果没有播放选项,尝试获取季度信息
-        if (playLinks.length === 0) {
+        // 旧结构兜底
+        if (playSources.length === 0) {
             const seasonLinks = $('.seasons-list a, .season-item a, .se-c a, .se-a a, .seasons a');
-            if (seasonLinks.length > 0) {
+            if (playLinks.length === 0 && seasonLinks.length > 0) {
                 seasonSources = await getSeasonEpisodes($, videoId);
                 if (seasonSources.length === 0) {
                     playLinks = [`播放$${videoId}`];
                 }
-            } else {
+            } else if (playLinks.length === 0) {
                 playLinks = [`播放$${videoId}`];
             }
-        }
 
-        // 转换为 vod_play_sources 格式
-        const videoIdForScrape = String(videoId || "");
-        const playSources = seasonSources.length > 0
-            ? buildSeasonPlaySources(seasonSources, vod.vod_name, videoIdForScrape)
-            : parsePlaySources(playLinks, vod.vod_name, videoIdForScrape);
+            playSources = seasonSources.length > 0
+                ? buildSeasonPlaySources(seasonSources, vod.vod_name, videoIdForScrape)
+                : parsePlaySources(playLinks, vod.vod_name, videoIdForScrape);
+        }
 
         let scrapeData = null;
         let videoMappings = [];
@@ -970,15 +1039,15 @@ async function search(params) {
     logInfo(`搜索关键词: ${wd}, 页码: ${pg}`);
 
     try {
-        let searchUrl = `${config.host}/xssearch?s=${encodeURIComponent(wd)}`;
+        let searchUrl = `${config.host}/search?q=${encodeURIComponent(wd)}`;
         if (pg > 1) {
-            searchUrl += `&p=${pg}`;
+            searchUrl += `&page=${pg}`;
         }
 
         const response = await axiosInstance.get(searchUrl, { headers: config.headers });
         const $ = cheerio.load(response.data);
 
-        const rawResults = getVideoList($, 'article, .items article, .content article, .search-results article');
+        const rawResults = getSearchVideoList($);
         const filteredResults = filterSearchResults(rawResults, wd);
 
         logInfo(`搜索到 ${filteredResults.length} 个结果`);
@@ -986,7 +1055,7 @@ async function search(params) {
         return {
             list: filteredResults,
             page: pg,
-            pagecount: 9999
+            pagecount: filteredResults.length > 0 ? pg + 1 : pg
         };
     } catch (error) {
         logError("搜索失败", error);

@@ -1,7 +1,8 @@
 // @name 乐兔
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持，广告：有
-// @version 1.0.5
+// @dependencies: axios, cheerio
+// @version 1.0.6
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/乐兔.js
 
 const axios = require("axios");

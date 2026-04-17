@@ -2,8 +2,8 @@
 // @indexs 1
 // @author lampon
 // @description 豆瓣推荐爬虫脚本
-// @version 1.0.3
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/%E6%A8%A1%E6%9D%BF/JavaScript/%E8%B1%86%E7%93%A3%E6%8E%A8%E8%8D%90.js
+// @version 1.0.5
+// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/模板/JavaScript/豆瓣推荐.js
 
 const OmniBox = require("omnibox_sdk");
 
@@ -17,12 +17,18 @@ module.exports = {
 const runner = require("spider_runner");
 runner.run(module.exports);
 
+function buildDoubanSubjectLink(vodId) {
+  return `https://movie.douban.com/subject/${vodId}`;
+}
+
+
 /**
  * 获取首页数据
  * @param {Object} params - 参数对象
  * @returns {Object} 返回分类列表和推荐视频列表
  */
 async function home(params, context) {
+  const sites = await OmniBox.getAnalyzeSites();
   try {
     // 构建分类列表
     const classes = [
@@ -48,10 +54,10 @@ async function home(params, context) {
           scene: "channel",
           new_mark_label_enabled: "1",
           vl_to_mvl: "",
-          free_watch_trans_info: '{"ad_frequency_control_time_list":{}}',
+          free_watch_trans_info: "{\"ad_frequency_control_time_list\":{}}",
           ad_exp_ids: "100000",
           ams_cookies: "lv_play_index=26; o_minduid=CpGFdExDeM8uP-XHCyma_0PzurMADpcf; appuser=83C1297D3AE9DEFF",
-          ad_trans_data: '{"game_sessions":[]}',
+          ad_trans_data: "{\"game_sessions\":[]}",
           skip_privacy_types: "0",
           support_click_scan: "1",
         },
@@ -277,7 +283,7 @@ async function home(params, context) {
           init: "", // 默认值：全部（空字符串）
           value: [
             { name: "全部", value: "" },
-            { name: "2026", value: "2026" },
+            { name: "2020年代", value: "2020年代" },
             { name: "2025", value: "2025" },
             { name: "2024", value: "2024" },
             { name: "2023", value: "2023" },
@@ -285,7 +291,6 @@ async function home(params, context) {
             { name: "2021", value: "2021" },
             { name: "2020", value: "2020" },
             { name: "2019", value: "2019" },
-            { name: "2020年代", value: "2020年代" },
             { name: "2010年代", value: "2010年代" },
             { name: "2000年代", value: "2000年代" },
             { name: "90年代", value: "90年代" },
@@ -378,7 +383,7 @@ async function home(params, context) {
           init: "", // 默认值：全部（空字符串）
           value: [
             { name: "全部", value: "" },
-            { name: "2026", value: "2026" },
+            { name: "2020年代", value: "2020年代" },
             { name: "2025", value: "2025" },
             { name: "2024", value: "2024" },
             { name: "2023", value: "2023" },
@@ -386,7 +391,6 @@ async function home(params, context) {
             { name: "2021", value: "2021" },
             { name: "2020", value: "2020" },
             { name: "2019", value: "2019" },
-            { name: "2020年代", value: "2020年代" },
             { name: "2010年代", value: "2010年代" },
             { name: "2000年代", value: "2000年代" },
             { name: "90年代", value: "90年代" },
@@ -482,7 +486,7 @@ async function home(params, context) {
           init: "", // 默认值：全部（空字符串）
           value: [
             { name: "全部", value: "" },
-            { name: "2026", value: "2026" },
+            { name: "2020年代", value: "2020年代" },
             { name: "2025", value: "2025" },
             { name: "2024", value: "2024" },
             { name: "2023", value: "2023" },
@@ -490,7 +494,6 @@ async function home(params, context) {
             { name: "2021", value: "2021" },
             { name: "2020", value: "2020" },
             { name: "2019", value: "2019" },
-            { name: "2020年代", value: "2020年代" },
             { name: "2010年代", value: "2010年代" },
             { name: "2000年代", value: "2000年代" },
             { name: "90年代", value: "90年代" },
@@ -541,11 +544,11 @@ async function home(params, context) {
       const tvListResponse = await OmniBox.request(tvListUrl, {
         method: "GET",
         headers: {
-          Accept: "*/*",
+          "Accept": "*/*",
           "Accept-Encoding": "gzip, deflate, br",
-          Connection: "keep-alive",
+          "Connection": "keep-alive",
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          referer: "https://movie.douban.com/tv/",
+          "referer": "https://movie.douban.com/tv/",
         },
       });
 
@@ -573,6 +576,7 @@ async function home(params, context) {
               vod_remarks = "新剧";
             }
 
+
             // 处理图片URL
             let vod_pic = item.pic?.large || item.pic?.normal || "";
             if (vod_pic) {
@@ -598,6 +602,7 @@ async function home(params, context) {
 
             return {
               vod_id: item.id || `douban_${item.uri}`,
+              link: buildDoubanSubjectLink(item.id || `douban_${item.uri}`),
               vod_name: item.title || "",
               vod_pic: vod_pic,
               type_id: "tv",
@@ -699,7 +704,7 @@ async function category(params, context) {
       const sort = filters.sort || "U"; // 排序，默认热度
 
       // 构建 selected_categories JSON（形式固定为"电视剧"）
-      const selectedCategories = { 形式: "电视剧" };
+      const selectedCategories = { "形式": "电视剧" };
       if (genre) selectedCategories["类型"] = genre;
       if (region) selectedCategories["地区"] = region;
       const selectedCategoriesStr = JSON.stringify(selectedCategories);
@@ -724,7 +729,7 @@ async function category(params, context) {
       const sort = filters.sort || "U"; // 排序，默认热度
 
       // 构建 selected_categories JSON（形式固定为"综艺"）
-      const selectedCategories = { 形式: "综艺" };
+      const selectedCategories = { "形式": "综艺" };
       if (genre) selectedCategories["类型"] = genre;
       if (region) selectedCategories["地区"] = region;
       const selectedCategoriesStr = JSON.stringify(selectedCategories);
@@ -748,11 +753,11 @@ async function category(params, context) {
     const response = await OmniBox.request(url, {
       method: "GET",
       headers: {
-        Accept: "*/*",
+        "Accept": "*/*",
         "Accept-Encoding": "gzip, deflate, br",
-        Connection: "keep-alive",
+        "Connection": "keep-alive",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        referer: referer,
+        "referer": referer,
       },
     });
 
@@ -815,6 +820,7 @@ async function category(params, context) {
         vod_remarks = categoryId === "movie" ? "新片" : "新剧";
       }
 
+
       // 处理图片URL，使用通用图片代理接口
       // 通过环境变量获取baseURL（脚本执行时会自动注入）
       const baseURL = context.baseURL || "";
@@ -850,6 +856,7 @@ async function category(params, context) {
 
       return {
         vod_id: item.id || `douban_${item.uri}`,
+        link: buildDoubanSubjectLink(item.id || `douban_${item.uri}`),
         vod_name: item.title || "",
         search: true,
         vod_pic: vod_pic,

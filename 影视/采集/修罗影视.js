@@ -2,7 +2,7 @@
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, cheerio, crypto-js
-// @version 1.0.4
+// @version 1.0.21
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/修罗影视.js
 
 /**
@@ -25,18 +25,44 @@ const cheerio = require("cheerio");
 const OmniBox = require("omnibox_sdk");
 const https = require("https");
 
-// ========== 全局配置 ==========
-const HOST = "https://www.xlys02.com";
-const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36";
-const MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Mobile/15E148 Safari/604.1";
+// ==================== 配置区域开始 ====================
+// 弹幕接口地址。未配置时不启用弹幕补充。
 const DANMU_API = process.env.DANMU_API || "";
+// 修罗专用 ddddocr 基础地址。若配置该项，优先按 ddddocr 风格处理。
+const RAW_XIULUO_DDDDOCR_API = String(process.env.XIULUO_DDDDOCR_API || "").trim();
+// 修罗专用普通 OCR 基础地址。仅在未配置 ddddocr 地址时参与兜底。
+const RAW_XIULUO_OCR_API = String(process.env.XIULUO_OCR_API || "").trim();
+// 通用 ddddocr 基础地址。作为修罗专用 ddddocr 地址的后备。
+const RAW_DDDDOCR_API = String(process.env.DDDDOCR_API || "").trim();
+// 通用 OCR 基础地址。作为修罗专用普通 OCR 地址的后备。
+const RAW_OCR_API = String(process.env.OCR_API || "").trim();
+// OCR 识别接口自定义路径。留空时自动按接口类型推断。
+const EXTERNAL_OCR_PATH = String(process.env.XIULUO_DDDDOCR_PATH || process.env.XIULUO_OCR_PATH || "").trim();
 
-// 会话缓存(20分钟)
+// 最终生效的外部 OCR 基础地址。优先级：修罗专用 ddddocr > 修罗专用 OCR > 通用 ddddocr > 通用 OCR。
+const EXTERNAL_OCR_API = String(RAW_XIULUO_DDDDOCR_API || RAW_XIULUO_OCR_API || RAW_DDDDOCR_API || RAW_OCR_API || "").trim();
+// OCR 接口类型标记：ddddocr 或普通 ocr，用于自动推断接口路径。
+const OCR_API_KIND = (RAW_XIULUO_DDDDOCR_API || RAW_DDDDOCR_API) ? "ddddocr" : ((RAW_XIULUO_OCR_API || RAW_OCR_API) ? "ocr" : "");
+// 默认公共 OCR 兜底接口。当自定义 OCR 失败时回退到该接口。
+const DEFAULT_OCR_API = "https://api.nn.ci/ocr/b64/json";
+// 搜索会话的 SDK 标准缓存键。
+const SESSION_CACHE_KEY = "xiuluo:search-cookie";
+// 搜索会话缓存时长：30 分钟。
+const SESSION_TTL = 30 * 60 * 1000;
+
+// 站点主域名。
+const HOST = "https://www.xlys02.com";
+// 桌面端请求 User-Agent。
+const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36";
+// 移动端请求 User-Agent。搜索与验证码链路优先使用该 UA。
+const MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Mobile/15E148 Safari/604.1";
+
+// 进程内搜索会话镜像缓存。优先配合 SDK 缓存一起使用，减少重复读取。
 let SESSION_CACHE = {
     cookie: null,
     expire: 0
 };
-const SESSION_TTL = 20 * 60 * 1000;
+// ==================== 配置区域结束 ====================
 
 /**
  * 创建 HTTPS Agent (忽略 SSL 证书验证)
@@ -179,6 +205,238 @@ const requestPost = async (url, data, options = {}) => {
     }
 };
 
+const resolveExternalOcrCandidates = () => {
+    const normalizedBase = EXTERNAL_OCR_API.replace(/\/$/, "");
+    if (!normalizedBase) return [DEFAULT_OCR_API];
+    const lower = normalizedBase.toLowerCase();
+    const looksLikeFullEndpoint = /\/(ocr|slide|det)(\/|$)|\/json(\/|$)/.test(lower);
+    if (looksLikeFullEndpoint) {
+        return [...new Set([normalizedBase, DEFAULT_OCR_API].filter(Boolean))];
+    }
+
+    const hasExplicitPath = !!EXTERNAL_OCR_PATH;
+    const inferredPaths = hasExplicitPath
+        ? [EXTERNAL_OCR_PATH]
+        : (OCR_API_KIND === "ddddocr" ? ["/ocr"] : ["/ocr/b64/json"]);
+    const candidates = [];
+    for (const path of inferredPaths) {
+        const normalizedPath = String(path || "").startsWith("/") ? String(path || "") : `/${String(path || "")}`;
+        candidates.push(`${normalizedBase}${normalizedPath}`);
+    }
+    candidates.push(normalizedBase, DEFAULT_OCR_API);
+    return [...new Set(candidates.filter(Boolean))];
+};
+
+const hasVerifyOperator = (raw) => /[+\-xX×*/]/.test(String(raw || ""));
+
+const normalizeVerifyText = (text) => String(text || "")
+    .replace(/\s/g, "")
+    .replace(/[=？?]+$/g, "")
+    .replace(/[xX×]/g, "*")
+    .replace(/[÷／]/g, "/")
+    .replace(/[－﹣—–]/g, "-")
+    .replace(/[十]/g, "+")
+    .replace(/[oO。]/g, "0");
+
+const shrinkNegativeSubtraction = (left, right) => {
+    let currentRight = String(right || "");
+    const leftNum = parseInt(left, 10);
+    if (Number.isNaN(leftNum) || !currentRight) return null;
+
+    while (currentRight.length > 0) {
+        const rightNum = parseInt(currentRight, 10);
+        if (!Number.isNaN(rightNum) && leftNum - rightNum >= 0) {
+            return `${left}-${currentRight}`;
+        }
+        currentRight = currentRight.slice(0, -1);
+    }
+
+    return null;
+};
+
+const normalizeVerifyExpression = (text) => {
+    let exp = normalizeVerifyText(text);
+    if (!exp) return "";
+
+    exp = exp.replace(/-7$/g, "");
+
+    const firstExprMatch = exp.match(/^(\d+)([\+\-\*\/])(\d+)/);
+    if (!firstExprMatch) return exp;
+
+    const left = firstExprMatch[1];
+    const op = firstExprMatch[2];
+    let right = firstExprMatch[3];
+
+    if (right.endsWith("7") && right.length > 1) {
+        right = right.slice(0, -1);
+    }
+    if (right.length > 2) {
+        right = right.slice(0, 2);
+    }
+    if (op === "-") {
+        const nonNegativeExpr = shrinkNegativeSubtraction(left, right);
+        if (nonNegativeExpr) return nonNegativeExpr;
+    }
+
+    return `${left}${op}${right}`;
+};
+
+const normalizePureDigitsVerifyExpr = (raw) => {
+    let digits = normalizeVerifyText(raw).replace(/\D/g, "");
+    if (!digits) return "";
+
+    if (digits.length >= 3 && digits.endsWith("7")) {
+        digits = digits.slice(0, -1);
+    }
+
+    if (digits.length === 4) {
+        return shrinkNegativeSubtraction(digits.slice(0, 2), digits.slice(2)) || `${digits.slice(0, 2)}-${digits.slice(2)}`;
+    }
+    if (digits.length === 5) {
+        return shrinkNegativeSubtraction(digits.slice(0, 2), digits.slice(-2)) || `${digits.slice(0, 2)}-${digits.slice(-2)}`;
+    }
+    return "";
+};
+
+const requestVerifyCodeByDefaultApi = async (b64) => {
+    try {
+        logInfo("🧾 OCR请求", { url: DEFAULT_OCR_API });
+        const ocrRes = await axiosInstance.post(DEFAULT_OCR_API, b64, {
+            headers: { "User-Agent": MOBILE_UA },
+            timeout: 8000,
+        });
+        const data = ocrRes.data || {};
+        const raw = String(
+            data?.result
+            || data?.data?.code
+            || data?.data?.result
+            || data?.data?.text
+            || data?.data?.ocr_text
+            || data?.code
+            || data?.text
+            || data?.ocr_text
+            || ""
+        ).trim();
+        const normalizedRaw = normalizeVerifyExpression(raw);
+        logInfo("🧾 OCR识别", { url: DEFAULT_OCR_API, raw });
+        return normalizedRaw || raw;
+    } catch (e) {
+        logError(`⚠ OCR异常 @ ${DEFAULT_OCR_API}`, e);
+        return "";
+    }
+};
+
+const requestVerifyCodeByOcr = async (b64) => {
+    const candidates = resolveExternalOcrCandidates();
+    let lastError = null;
+    let fallbackRaw = "";
+    for (const url of candidates) {
+        try {
+            logInfo("🧾 OCR请求", { url });
+            const lower = String(url || "").toLowerCase();
+            const isDefaultApi = url === DEFAULT_OCR_API;
+            const isDdddocrTextApi = /\/ocr(\/|$)/.test(lower) && !/\/b64\/json(\/|$)/.test(lower);
+            const payload = isDefaultApi
+                ? b64
+                : (isDdddocrTextApi
+                    ? { data: `data:image/png;base64,${b64}`, mode: 1, range: 7 }
+                    : { image: b64, img: b64, base64: b64, data: `data:image/png;base64,${b64}` });
+            const headers = { "User-Agent": MOBILE_UA };
+            if (!isDefaultApi) headers["Content-Type"] = "application/json";
+            const ocrRes = await axiosInstance.post(url, payload, { headers, timeout: 8000 });
+            const data = ocrRes.data || {};
+            const raw = String(
+                data?.result
+                || data?.data?.code
+                || data?.data?.result
+                || data?.data?.text
+                || data?.data?.ocr_text
+                || data?.code
+                || data?.text
+                || data?.ocr_text
+                || ""
+            ).trim().split("=")[0].trim();
+            const normalizedRaw = normalizeVerifyExpression(raw);
+            logInfo("🧾 OCR识别", { url, raw });
+            if (!raw) continue;
+            if (hasVerifyOperator(normalizedRaw)) return normalizedRaw;
+            const normalizedExpr = normalizePureDigitsVerifyExpr(raw);
+            if (normalizedExpr) {
+                logInfo("🧮 纯数字验证码改写", { raw, normalizedExpr });
+                return normalizedExpr;
+            }
+            if (isDefaultApi) {
+                logInfo("⚠ 默认OCR结果不含运算符且无法改写，视为失败", { raw });
+                fallbackRaw = raw;
+                continue;
+            }
+            logInfo("⚠ OCR结果不含运算符且无法改写，尝试默认OCR兜底", { url, raw });
+            const defaultRaw = await requestVerifyCodeByDefaultApi(b64);
+            if (defaultRaw && hasVerifyOperator(defaultRaw)) return defaultRaw;
+            const normalizedDefaultExpr = normalizePureDigitsVerifyExpr(defaultRaw);
+            if (normalizedDefaultExpr) {
+                logInfo("🧮 默认OCR纯数字改写", { raw: defaultRaw, normalizedExpr: normalizedDefaultExpr });
+                return normalizedDefaultExpr;
+            }
+            fallbackRaw = defaultRaw || raw;
+            break;
+        } catch (e) {
+            lastError = e;
+            logError(`⚠ OCR异常 @ ${url}`, e);
+        }
+    }
+    if (fallbackRaw && !hasVerifyOperator(fallbackRaw)) {
+        return "";
+    }
+    if (lastError) throw lastError;
+    return "";
+};
+
+const loadSessionCache = async () => {
+    const now = Date.now();
+    if (SESSION_CACHE.cookie && now < SESSION_CACHE.expire) {
+        return SESSION_CACHE.cookie;
+    }
+    try {
+        const cached = await OmniBox.getCache(SESSION_CACHE_KEY);
+        if (!cached) return "";
+        const parsed = typeof cached === "string" ? JSON.parse(cached) : cached;
+        const cookie = String(parsed?.cookie || "").trim();
+        const expire = Number(parsed?.expire || 0);
+        if (cookie && expire > now) {
+            SESSION_CACHE.cookie = cookie;
+            SESSION_CACHE.expire = expire;
+            return cookie;
+        }
+    } catch (e) {
+        logError("读取SDK会话缓存失败", e);
+    }
+    return "";
+};
+
+const saveSessionCache = async (cookie) => {
+    const value = String(cookie || "").trim();
+    if (!value) return;
+    const expire = Date.now() + SESSION_TTL;
+    SESSION_CACHE.cookie = value;
+    SESSION_CACHE.expire = expire;
+    try {
+        await OmniBox.setCache(SESSION_CACHE_KEY, JSON.stringify({ cookie: value, expire }), Math.ceil(SESSION_TTL / 1000));
+    } catch (e) {
+        logError("写入SDK会话缓存失败", e);
+    }
+};
+
+const clearSessionCache = async () => {
+    SESSION_CACHE.cookie = null;
+    SESSION_CACHE.expire = 0;
+    try {
+        await OmniBox.setCache(SESSION_CACHE_KEY, JSON.stringify({ cookie: "", expire: 0 }), 1);
+    } catch (e) {
+        logError("清理SDK会话缓存失败", e);
+    }
+};
+
 /**
  * 通过API进行聚合搜索(验证码失败兜底)
  */
@@ -267,18 +525,29 @@ const filters = {
 // ========== 验证码计算 ==========
 const calcVerifyCode = (text) => {
     if (!text) return null;
-    let exp = text.replace(/\s/g, "").replace("=", "");
-    exp = exp.replace(/[xX×]/g, "*").replace(/-/g, "-");
-    const match = exp.match(/^(\d+)([\+\-\*])(\d+)$/);
+
+    const exp = normalizeVerifyExpression(text);
+    const match = exp.match(/^(\d+)([\+\-\*\/])(\d+)$/);
     if (!match) return null;
+
     const a = parseInt(match[1], 10);
     const op = match[2];
     const b = parseInt(match[3], 10);
+
     switch (op) {
-        case "+": return a + b;
-        case "-": return a - b;
-        case "*": return a * b;
-        default: return null;
+        case "+":
+            return a + b;
+        case "-":
+            return a - b;
+        case "*": {
+            const result = a * b;
+            return (a >= 10 && b >= 10) ? (a + b) : result;
+        }
+        case "/":
+            if (!b) return null;
+            return Math.floor(a / b);
+        default:
+            return null;
     }
 };
 
@@ -701,32 +970,42 @@ async function search(params) {
         return { list: [] };
     }
 
-    const now = Date.now();
+    const cachedCookie = await loadSessionCache();
 
-    // 优先使用缓存
-    if (SESSION_CACHE.cookie && now < SESSION_CACHE.expire) {
-        logInfo("♻ 使用缓存会话");
+    // 优先使用 SDK 缓存会话
+    if (cachedCookie) {
+        logInfo("♻ 使用SDK缓存会话");
         try {
-            const fastUrl = `${HOST}/search/${encodeURIComponent(keyword)}/${pg}`;
+            const fastUrl = `${HOST}/search/${encodeURIComponent(keyword)}`;
+            const fastReferer = `${HOST}/search/${encodeURIComponent(keyword)}?code=0`;
             const fastRes = await axiosInstance.get(fastUrl, {
                 headers: {
-                    "User-Agent": MOBILE_UA,
-                    "Cookie": SESSION_CACHE.cookie
+                    "User-Agent": UA,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+                    "Upgrade-Insecure-Requests": "1",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-User": "?1",
+                    "Cookie": cachedCookie,
+                    "Referer": fastReferer,
                 }
             });
             const result = await parseSearch(fastRes.data, pg, keyword);
-            if (result.list.length > 0) {
-                logInfo("✅ 缓存会话有效");
+            if (result.list.length > 0 || !(String(fastRes.data || "").includes("verifyCode") || String(fastRes.data || "").includes("验证码"))) {
+                logInfo("✅ SDK缓存会话有效");
                 return result;
             }
-            logInfo("⚠ 缓存失效，重新验证");
+            logInfo("⚠ SDK缓存失效，重新验证");
+            await clearSessionCache();
         } catch (e) {
-            logError("⚠ 缓存请求异常", e);
+            logError("⚠ SDK缓存请求异常", e);
+            await clearSessionCache();
         }
     }
 
     logInfo(`🔍 开始搜索: ${keyword}`);
-    const ocrApi = "https://api.nn.ci/ocr/b64/json";
     const MAX_FLOW_RETRY = 3;
 
     try {
@@ -760,12 +1039,8 @@ async function search(params) {
                         }
                     );
                     const b64 = Buffer.from(imgRes.data).toString("base64");
-                    const ocrRes = await axiosInstance.post(ocrApi, b64, {
-                        headers: { "User-Agent": MOBILE_UA },
-                        timeout: 8000
-                    });
-                    const raw = ocrRes.data?.result?.trim();
-                    logInfo(`🧾 OCR识别: ${raw}`);
+                    logInfo("🖼 验证码Base64", { preview: b64.slice(0, 160), length: b64.length, dataUrl: `data:image/png;base64,${b64}` });
+                    const raw = await requestVerifyCodeByOcr(b64);
                     verifyCode = calcVerifyCode(raw);
                     if (verifyCode !== null) {
                         logInfo(`✅ 验证码计算结果: ${verifyCode}`);
@@ -802,9 +1077,8 @@ async function search(params) {
 
             const result = await parseSearch(html, pg, keyword);
             if (result.list.length > 0) {
-                SESSION_CACHE.cookie = finalCookie;
-                SESSION_CACHE.expire = Date.now() + SESSION_TTL;
-                logInfo("💾 会话缓存成功(20分钟)");
+                await saveSessionCache(finalCookie);
+                logInfo("💾 会话缓存成功(30分钟)");
                 logInfo(`🎯 搜索成功: ${result.list.length}条`);
                 return result;
             }
@@ -877,7 +1151,7 @@ async function parseSearch(html, pg, keyword = "") {
     }
 
     logInfo(`📄 分页识别: 当前=${pg} 最大=${pagecount}`);
-    return { list, page: pg, pagecount, total: pagecount };
+    return { list, page: pg, pagecount, total: list.length };
 }
 
 async function play(params) {

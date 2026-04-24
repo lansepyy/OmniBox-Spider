@@ -2,7 +2,7 @@
 // @author lampon
 // @description
 // @dependencies axios
-// @version 1.1.5
+// @version 1.1.8
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/影巢.js
 
 const OmniBox = require("omnibox_sdk");
@@ -47,6 +47,12 @@ const HDHIVE_PROXY_URL = process.env.HDHIVE_PROXY_URL || "";
 const PANCHECK_API = process.env.PANCHECK_API || "";
 const PANCHECK_ENABLED = true;
 const PANCHECK_PLATFORMS = process.env.PANCHECK_PLATFORMS || "quark";
+// HDHive /resources/unlock 限流配置（接口级别）
+// 默认：1 分钟窗口内最多 3 次；第 4 次起直接短路，不再实际请求。
+const HDHIVE_UNLOCK_RATE_LIMIT_ENABLED = String(process.env.HDHIVE_UNLOCK_RATE_LIMIT_ENABLED || "true").toLowerCase() === "true";
+const HDHIVE_UNLOCK_RATE_LIMIT_WINDOW_MS = Number(process.env.HDHIVE_UNLOCK_RATE_LIMIT_WINDOW_MS || 60 * 1000);
+const HDHIVE_UNLOCK_RATE_LIMIT_MAX_CALLS = Number(process.env.HDHIVE_UNLOCK_RATE_LIMIT_MAX_CALLS || 3);
+const HDHIVE_UNLOCK_RATE_LIMIT_CACHE_KEY = process.env.HDHIVE_UNLOCK_RATE_LIMIT_CACHE_KEY || "yingchao:hdhive:unlock-rate-limit";
 // 读取环境变量：支持多个网盘类型，用分号分割；仅这些网盘类型启用多线路
 const DRIVE_TYPE_CONFIG = (process.env.DRIVE_TYPE_CONFIG || "quark;uc")
   .split(";")
@@ -658,10 +664,49 @@ async function checkLinksWithPanCheck(links) {
   }
 }
 
+async function getHDHiveRateLimitState() {
+  try {
+    const raw = await OmniBox.getCache(HDHIVE_UNLOCK_RATE_LIMIT_CACHE_KEY);
+    if (!raw) return { startedAt: Date.now(), count: 0 };
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    const startedAt = Number(parsed?.startedAt || 0);
+    const count = Number(parsed?.count || 0);
+    if (!startedAt || Date.now() - startedAt >= HDHIVE_UNLOCK_RATE_LIMIT_WINDOW_MS) {
+      return { startedAt: Date.now(), count: 0 };
+    }
+    return { startedAt, count };
+  } catch (_) {
+    return { startedAt: Date.now(), count: 0 };
+  }
+}
+
+async function markHDHiveRateLimitHit() {
+  const state = await getHDHiveRateLimitState();
+  const next = { startedAt: state.startedAt, count: state.count + 1 };
+  const ttlSeconds = Math.max(1, Math.ceil((HDHIVE_UNLOCK_RATE_LIMIT_WINDOW_MS - (Date.now() - next.startedAt)) / 1000));
+  try {
+    await OmniBox.setCache(HDHIVE_UNLOCK_RATE_LIMIT_CACHE_KEY, JSON.stringify(next), ttlSeconds);
+  } catch (_) {
+    // ignore
+  }
+  return next;
+}
+
 async function requestHDHive(path, method = "GET", bodyObj = null) {
   if (!HDHIVE_API_KEY) {
     throw new Error("HDHive API Key 未配置：请设置 HDHIVE_API_KEY");
   }
+
+  if (path === "/resources/unlock" && HDHIVE_UNLOCK_RATE_LIMIT_ENABLED) {
+    const rateState = await getHDHiveRateLimitState();
+    if (rateState.count >= HDHIVE_UNLOCK_RATE_LIMIT_MAX_CALLS) {
+      const message = `HDHive unlock 限流触发: ${Math.floor(HDHIVE_UNLOCK_RATE_LIMIT_WINDOW_MS / 1000)}秒内超过${HDHIVE_UNLOCK_RATE_LIMIT_MAX_CALLS}次，跳过请求 ${method} ${path}`;
+      await OmniBox.log("warn", message);
+      return { success: false, data: null, message, code: "429", rateLimited: true };
+    }
+    await markHDHiveRateLimitHit();
+  }
+
   const url = `${HDHIVE_API_BASE_URL}${path}`;
   const headers = {
     Accept: "*/*",
@@ -1631,6 +1676,10 @@ async function detail(params, context) {
     const unlockResp = await requestHDHive("/resources/unlock", "POST", {
       slug: payload.slug,
     });
+    if (unlockResp?.rateLimited) {
+      await OmniBox.log("warn", `tmdb.js detail 被限流短路: slug=${payload.slug}`);
+      return { list: [] };
+    }
     const shareURL = safeString(
       unlockResp?.data?.full_url || unlockResp?.data?.url,
     );

@@ -1,20 +1,57 @@
 // @name MakkaPakka聚合导航
 // @author 梦
-// @description 基于 AstrBot Widget 通用桥接的 OmniBox 导航源，动态读取远端 Widget Metadata 与模块函数
-// @version 1.0.0
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/综合/导航/MakkaPakka聚合导航.js
+// @description 基于 AstrBot Widget 通用桥接的 OmniBox 导航源，动态读取远端 Widget Metadata 与模块函数，支持顶部集中配置与详细外部请求日志
+// @indexs 1
+// @dependencies: cheerio
+// @version 1.1.3
+// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/导航/MakkaPakka聚合导航.js
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");
 const vm = require("vm");
 const cheerio = require("cheerio");
 
+/* ==================== 配置区域开始 ====================
+ * 说明：
+ * 1. 所有可配置项统一前置，便于快速维护。
+ * 2. 支持环境变量覆盖的配置优先放最前面，部署时可直接修改环境变量而无需改脚本。
+ * 3. 若未设置环境变量，则自动回退到本文件内的默认值。
+ * 4. 下方“固定默认配置”通常无需频繁修改，仅在结构或展示策略调整时再改。
+ * ==================== 配置区域结束 ==================== */
+
+// ===== 支持环境变量覆盖的配置（优先级最高） =====
+// Widget 源地址：支持环境变量覆盖，默认走 gh-proxy 直链，避免 raw 域名在部分环境下不稳定。
 const WIDGET_URL =
   process.env.MAKKA_WIDGET_URL ||
-  "https://raw.githubusercontent.com/MakkaPakka518/FW/refs/heads/main/widgets/mk-2.0/MakkaPakka-ALL.js";
-const CACHE_TTL_MS = parseInt(process.env.MAKKA_WIDGET_CACHE_MS || "1800000", 10);
-const DEFAULT_PAGE_SIZE = 20;
+  "https://gh-proxy.org/raw.githubusercontent.com/MakkaPakka518/FW/refs/heads/main/widgets/mk-2.0/MakkaPakka-ALL.js";
+// Widget 请求超时时间（毫秒）。
 const REQUEST_TIMEOUT_MS = parseInt(process.env.MAKKA_WIDGET_TIMEOUT_MS || "20000", 10);
+// Widget 源缓存 TTL（毫秒）。
+const CACHE_TTL_MS = parseInt(process.env.MAKKA_WIDGET_CACHE_MS || "1800000", 10);
+// TMDB API 基础地址。
+const TMDB_API_BASE_URL =
+  process.env.TMDB_API_BASE_URL ||
+  "https://api.tmdb.org/3";
+// TMDB 令牌 / Key：按兼容优先级依次读取。
+const TMDB_BEARER_TOKEN = (process.env.TMDB_BEARER_TOKEN || "").trim();
+const TMDB_AUTH_TOKEN = (process.env.TMDB_AUTH_TOKEN || "").trim();
+const TMDB_ACCESS_TOKEN = (process.env.TMDB_ACCESS_TOKEN || "").trim();
+const TMDB_API_KEY = (process.env.TMDB_API_KEY || "").trim();
+const TMDB_KEY = (process.env.TMDB_KEY || "").trim();
+// 外部请求日志里 body 预览的最大长度。
+const EXTERNAL_LOG_BODY_LIMIT = parseInt(process.env.MAKKA_EXTERNAL_LOG_BODY_LIMIT || "400", 10);
+// 是否打印更详细的外部响应体预览：1 开启，0 关闭。
+const ENABLE_VERBOSE_EXTERNAL_LOG =
+  String(process.env.MAKKA_VERBOSE_EXTERNAL_LOG || "1") === "1";
+
+// ===== 固定默认配置 =====
+const DEFAULT_PAGE_SIZE = 20;
+const DEFAULT_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+  Accept: "text/plain,application/javascript,application/json,text/html,*/*",
+};
+
+// ===== 配置区域结束 =====
 
 const state = {
   loadedAt: 0,
@@ -31,9 +68,12 @@ module.exports = {
 runner.run(module.exports);
 
 async function home(params, context) {
+  await safeLog("info", `Makka导航 home 开始: params=${safeJson(params)}`);
+
   try {
     const widget = await loadWidgetRuntime();
     const modules = getModules(widget.widgetMetadata);
+    await safeLog("info", `Makka导航 home 模块数: ${modules.length}`);
 
     const classes = modules.map((mod, index) => ({
       type_id: mod.functionName || `module_${index + 1}`,
@@ -77,13 +117,21 @@ async function home(params, context) {
       filters[categoryId] = filterList;
     }
 
-    const list = [];
-    if (modules.length > 0) {
-      const firstCategoryId = modules[0].functionName;
-      const firstModule = modules[0];
-      const initialParams = buildModuleParams(firstModule, 1, {});
-      const items = await callWidgetModule(widget, firstCategoryId, initialParams);
-      list.push(...mapWidgetItemsToOmniBox(items, firstCategoryId, firstModule, context));
+    let list = [];
+    for (const mod of modules) {
+      const categoryId = mod.functionName;
+      const initialParams = buildModuleParams(mod, 1, {});
+      await safeLog("info", `Makka导航 home 模块尝试: categoryId=${categoryId} callParams=${safeJson(initialParams)}`);
+      const items = await callWidgetModule(widget, categoryId, initialParams);
+      const mapped = mapWidgetItemsToOmniBox(items, categoryId, mod, context);
+      await safeLog(
+        "info",
+        `Makka导航 home 模块结果: categoryId=${categoryId} raw=${Array.isArray(items) ? items.length : 0} mapped=${mapped.length}`,
+      );
+      if (mapped.length > 0) {
+        list = mapped;
+        break;
+      }
     }
 
     return {
@@ -92,7 +140,7 @@ async function home(params, context) {
       list,
     };
   } catch (error) {
-    await safeLog("error", `Makka导航 home 失败: ${error.message}`);
+    await logErrorWithStack("Makka导航 home 失败", error);
     return {
       class: [],
       filters: {},
@@ -112,6 +160,11 @@ async function category(params, context) {
   const categoryId = String(params.categoryId || "").trim();
   const filterValues = normalizeFilters(params.filters);
 
+  await safeLog(
+    "info",
+    `Makka导航 category 开始: categoryId=${categoryId} page=${page} filters=${safeJson(filterValues)}`,
+  );
+
   try {
     const widget = await loadWidgetRuntime();
     const moduleDef = getModules(widget.widgetMetadata).find(
@@ -119,6 +172,7 @@ async function category(params, context) {
     );
 
     if (!moduleDef) {
+      await safeLog("warn", `Makka导航 category 未找到栏目: categoryId=${categoryId}`);
       return {
         page,
         pagecount: 0,
@@ -134,11 +188,18 @@ async function category(params, context) {
     }
 
     const callParams = buildModuleParams(moduleDef, page, filterValues);
+    await safeLog("info", `Makka导航 category 调用模块: categoryId=${categoryId} callParams=${safeJson(callParams)}`);
+
     const items = await callWidgetModule(widget, categoryId, callParams);
     const list = mapWidgetItemsToOmniBox(items, categoryId, moduleDef, context);
 
     const pagecount = list.length < DEFAULT_PAGE_SIZE ? page : page + 1;
     const total = (page - 1) * DEFAULT_PAGE_SIZE + list.length;
+
+    await safeLog(
+      "info",
+      `Makka导航 category 完成: categoryId=${categoryId} raw=${Array.isArray(items) ? items.length : 0} mapped=${list.length} pagecount=${pagecount} total=${total}`,
+    );
 
     return {
       page,
@@ -147,7 +208,7 @@ async function category(params, context) {
       list,
     };
   } catch (error) {
-    await safeLog("error", `Makka导航 category 失败(${categoryId}): ${error.message}`);
+    await logErrorWithStack(`Makka导航 category 失败(${categoryId})`, error);
     return {
       page,
       pagecount: 0,
@@ -172,6 +233,7 @@ async function loadWidgetRuntime(force = false) {
     state.scriptText &&
     now - state.loadedAt < CACHE_TTL_MS
   ) {
+    await safeLog("info", `Makka导航 Widget 命中缓存: ageMs=${now - state.loadedAt} ttlMs=${CACHE_TTL_MS}`);
     return {
       sandbox: state.sandbox,
       widgetMetadata: state.widgetMetadata,
@@ -179,12 +241,12 @@ async function loadWidgetRuntime(force = false) {
     };
   }
 
-  const response = await OmniBox.request(WIDGET_URL, {
+  await safeLog("info", `Makka导航 开始拉取 Widget 脚本: url=${WIDGET_URL}`);
+  const response = await requestWithLogging("widget-script", WIDGET_URL, {
     method: "GET",
     timeout: REQUEST_TIMEOUT_MS,
     headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      Accept: "text/plain,application/javascript,*/*",
+      ...DEFAULT_HEADERS,
       Referer: "https://github.com/",
     },
   });
@@ -194,17 +256,29 @@ async function loadWidgetRuntime(force = false) {
   }
 
   const scriptText = typeof response.body === "string" ? response.body : String(response.body);
+  await safeLog("info", `Makka导航 Widget 脚本长度: ${scriptText.length}`);
+
   const sandbox = createWidgetSandbox();
   vm.createContext(sandbox);
-  vm.runInContext(scriptText, sandbox, {
-    filename: "MakkaPakka-ALL.js",
-    timeout: REQUEST_TIMEOUT_MS,
-  });
+  try {
+    vm.runInContext(scriptText, sandbox, {
+      filename: "MakkaPakka-ALL.js",
+      timeout: REQUEST_TIMEOUT_MS,
+    });
+  } catch (error) {
+    await logErrorWithStack("Makka导航 Widget 脚本执行失败", error);
+    throw error;
+  }
 
   const widgetMetadata = sandbox.WidgetMetadata;
   if (!widgetMetadata || !Array.isArray(widgetMetadata.modules)) {
     throw new Error("WidgetMetadata.modules 缺失或格式异常");
   }
+
+  await safeLog(
+    "info",
+    `Makka导航 Widget 加载完成: modules=${widgetMetadata.modules.length} title=${widgetMetadata.title || ""}`,
+  );
 
   state.loadedAt = now;
   state.scriptText = scriptText;
@@ -236,10 +310,11 @@ function createWidgetSandbox() {
   sandbox.Widget = {
     http: {
       get: async (url, options = {}) => {
-        const res = await OmniBox.request(url, {
+        const headers = normalizeHeaders(options.headers || {});
+        const res = await requestWithLogging("widget-http-get", url, {
           method: "GET",
           timeout: REQUEST_TIMEOUT_MS,
-          headers: options.headers || {},
+          headers,
         });
         return {
           status: res.statusCode,
@@ -264,8 +339,7 @@ function createWidgetSandbox() {
 }
 
 async function tmdbGet(endpoint, params = {}) {
-  const base = process.env.TMDB_API_BASE_URL || "https://api.tmdb.org/3";
-  const url = new URL(`${base.replace(/\/$/, "")}/${String(endpoint || "").replace(/^\//, "")}`);
+  const url = new URL(`${TMDB_API_BASE_URL.replace(/\/$/, "")}/${String(endpoint || "").replace(/^\//, "")}`);
 
   Object.entries(params || {}).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "") {
@@ -275,16 +349,11 @@ async function tmdbGet(endpoint, params = {}) {
 
   const headers = {
     Accept: "application/json",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "User-Agent": DEFAULT_HEADERS["User-Agent"],
   };
 
-  const bearer = (
-    process.env.TMDB_BEARER_TOKEN ||
-    process.env.TMDB_AUTH_TOKEN ||
-    process.env.TMDB_ACCESS_TOKEN ||
-    ""
-  ).trim();
-  const apiKey = (process.env.TMDB_API_KEY || process.env.TMDB_KEY || "").trim();
+  const bearer = TMDB_BEARER_TOKEN || TMDB_AUTH_TOKEN || TMDB_ACCESS_TOKEN;
+  const apiKey = TMDB_API_KEY || TMDB_KEY;
 
   if (bearer) {
     headers.Authorization = `Bearer ${bearer}`;
@@ -294,7 +363,7 @@ async function tmdbGet(endpoint, params = {}) {
     throw new Error("TMDB 未配置：请设置 TMDB_API_KEY/TMDB_KEY 或 TMDB_BEARER_TOKEN");
   }
 
-  const res = await OmniBox.request(url.toString(), {
+  const res = await requestWithLogging("tmdb", url.toString(), {
     method: "GET",
     timeout: REQUEST_TIMEOUT_MS,
     headers,
@@ -305,11 +374,27 @@ async function tmdbGet(endpoint, params = {}) {
   }
 
   const text = typeof res.body === "string" ? res.body : String(res.body);
-  return JSON.parse(text);
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    await safeLog("error", `TMDB 返回 JSON 解析失败: url=${url.toString()} bodyPreview=${clipText(text)}`);
+    throw error;
+  }
 }
 
 function getModules(widgetMetadata) {
-  return Array.isArray(widgetMetadata?.modules) ? widgetMetadata.modules : [];
+  const modules = Array.isArray(widgetMetadata?.modules) ? widgetMetadata.modules.slice() : [];
+  const shouldMoveLast = (item) => {
+    const title = String(item?.title || "").trim();
+    const functionName = String(item?.functionName || "").trim();
+    return title.includes("动漫全境聚合") || functionName.includes("动漫全境聚合");
+  };
+
+  return modules.sort((a, b) => {
+    const aLast = shouldMoveLast(a) ? 1 : 0;
+    const bLast = shouldMoveLast(b) ? 1 : 0;
+    return aLast - bLast;
+  });
 }
 
 function normalizeParamDefs(params) {
@@ -369,17 +454,35 @@ async function callWidgetModule(widget, functionName, callParams) {
     throw new Error(`Widget 函数不存在: ${functionName}`);
   }
 
-  const result = await fn(callParams || {});
-  if (Array.isArray(result)) return result;
-  if (result && Array.isArray(result.list)) return result.list;
-  if (result && Array.isArray(result.items)) return result.items;
-  return [];
+  await safeLog("info", `Makka导航 调用 Widget 函数: functionName=${functionName} params=${safeJson(callParams)}`);
+
+  let result;
+  try {
+    result = await fn(callParams || {});
+  } catch (error) {
+    await logErrorWithStack(`Makka导航 Widget 函数执行异常(${functionName})`, error);
+    throw error;
+  }
+
+  const normalized = Array.isArray(result)
+    ? result
+    : result && Array.isArray(result.list)
+      ? result.list
+      : result && Array.isArray(result.items)
+        ? result.items
+        : [];
+
+  await safeLog(
+    "info",
+    `Makka导航 Widget 函数完成: functionName=${functionName} resultType=${detectType(result)} normalizedLength=${normalized.length}`,
+  );
+
+  return normalized;
 }
 
 function mapWidgetItemsToOmniBox(items, categoryId, moduleDef, context) {
   if (!Array.isArray(items)) return [];
   const typeName = stripEmoji(moduleDef?.title || categoryId || "导航");
-
   return items.map((item, index) => mapSingleItem(item, index, typeName, context)).filter(Boolean);
 }
 
@@ -416,6 +519,7 @@ function mapSingleItem(item, index, typeName, context) {
   }
 
   return {
+    // 保留原始 id / tmdbId，并通过 search 提示宿主走搜索跳转。
     vod_id: String(item.tmdbId || item.id || `${typeName}_${index + 1}`),
     vod_name: title,
     vod_pic: posterPath,
@@ -483,6 +587,80 @@ function simpleHash(input) {
     hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
   }
   return hash.toString(16);
+}
+
+async function requestWithLogging(tag, url, options = {}) {
+  const requestUrl = String(url || "");
+  const requestOptions = {
+    ...options,
+    headers: normalizeHeaders(options.headers || {}),
+  };
+
+  await safeLog(
+    "info",
+    `Makka导航 外部请求开始[${tag}]: url=${requestUrl} method=${requestOptions.method || "GET"} timeout=${requestOptions.timeout || ""} headers=${safeJson(requestOptions.headers)}`,
+  );
+
+  try {
+    const res = await OmniBox.request(requestUrl, requestOptions);
+    const bodyText = typeof res.body === "string" ? res.body : String(res.body || "");
+    const contentType = res.headers?.["content-type"] || res.headers?.["Content-Type"] || "";
+
+    if (ENABLE_VERBOSE_EXTERNAL_LOG) {
+      await safeLog(
+        "info",
+        `Makka导航 外部请求完成[${tag}]: url=${requestUrl} status=${res.statusCode} contentType=${contentType} bodyPreview=${clipText(bodyText)}`,
+      );
+    } else {
+      await safeLog(
+        "info",
+        `Makka导航 外部请求完成[${tag}]: url=${requestUrl} status=${res.statusCode} contentType=${contentType} bodyLength=${bodyText.length}`,
+      );
+    }
+
+    return res;
+  } catch (error) {
+    await safeLog(
+      "error",
+      `Makka导航 外部请求异常[${tag}]: url=${requestUrl} error=${error?.message || String(error)} stack=${clipText(error?.stack || "")}`,
+    );
+    throw error;
+  }
+}
+
+function normalizeHeaders(headers) {
+  return {
+    ...DEFAULT_HEADERS,
+    ...(headers || {}),
+  };
+}
+
+function clipText(text) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  if (!value) return "";
+  if (value.length <= EXTERNAL_LOG_BODY_LIMIT) return value;
+  return `${value.slice(0, EXTERNAL_LOG_BODY_LIMIT)}...<truncated>`;
+}
+
+function detectType(value) {
+  if (Array.isArray(value)) return "array";
+  if (value === null) return "null";
+  return typeof value;
+}
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value);
+  } catch (_) {
+    return '"[unserializable]"';
+  }
+}
+
+async function logErrorWithStack(prefix, error) {
+  await safeLog(
+    "error",
+    `${prefix}: ${error?.message || String(error)} stack=${clipText(error?.stack || "")}`,
+  );
 }
 
 async function safeLog(level, message) {

@@ -2,7 +2,7 @@
 # @name 人人电影
 # @author 梦
 # @description 影视站：https://www.rrdynb.com/ ，支持首页、分类、搜索、详情与网盘线路提取（Python版）
-# @version 1.1.3
+# @version 1.2.1
 # @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/人人电影.py
 
 import json
@@ -12,9 +12,36 @@ import re
 from urllib.parse import quote
 from spider_runner import OmniBox, run
 
+
+def split_config_list(value: str):
+    return [item.strip() for item in str(value or "").replace(",", ";").split(";") if item.strip()]
+
+
+# ==================== 配置区域开始 ====================
+# 站点基础地址。
 BASE_URL = "https://www.rrdynb.com"
+# 站点请求默认 User-Agent。
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
 
+# FlareSolverr 服务地址。留空表示不启用，需通过环境变量显式配置。
+RRDYNB_FLARESOLVERR_URL = str(os.environ.get("RRDYNB_FLARESOLVERR_URL") or "").strip()
+# FlareSolverr 会话名。用于复用已过验证的浏览器会话。
+RRDYNB_FLARESOLVERR_SESSION = str(os.environ.get("RRDYNB_FLARESOLVERR_SESSION") or "rrdynb-search").strip()
+# FlareSolverr 单次请求最大等待时间（毫秒）。
+RRDYNB_FLARESOLVERR_TIMEOUT_MS = max(10000, int(os.environ.get("RRDYNB_FLARESOLVERR_TIMEOUT_MS", "60000") or 60000))
+# 是否启用 FlareSolverr 搜索链路。
+RRDYNB_SEARCH_USE_FLARESOLVERR = str(os.environ.get("RRDYNB_SEARCH_USE_FLARESOLVERR", "true")).lower() == "true"
+
+# 网盘类型白名单。命中这些类型时才启用多线路（本地代理/服务端代理/直连）策略。
+DRIVE_TYPE_CONFIG = [item.lower() for item in split_config_list(os.environ.get("DRIVE_TYPE_CONFIG", "quark;uc"))]
+# 多线路展示名配置，默认顺序：本地代理 / 服务端代理 / 直连。
+SOURCE_NAMES_CONFIG = split_config_list(os.environ.get("SOURCE_NAMES_CONFIG", "本地代理;服务端代理;直连"))
+# 是否强制允许服务端代理；默认仅在宿主 baseURL 为私网时自动允许。
+EXTERNAL_SERVER_PROXY_ENABLED = str(os.environ.get("EXTERNAL_SERVER_PROXY_ENABLED", "false")).lower() == "true"
+# 网盘源排序优先级。
+DRIVE_ORDER = [item.lower() for item in split_config_list(os.environ.get("DRIVE_ORDER", "baidu;tianyi;quark;uc;115;xunlei;ali;123pan"))]
+
+# 分类映射配置。
 CATEGORY_MAP = {
     "movie": {"type_id": "2", "type_name": "电影", "path": "/movie/"},
     "tv": {"type_id": "6", "type_name": "电视剧", "path": "/dianshiju/"},
@@ -22,18 +49,18 @@ CATEGORY_MAP = {
     "anime": {"type_id": "13", "type_name": "动漫", "path": "/dongman/"},
 }
 TYPEID_TO_KEY = {v["type_id"]: k for k, v in CATEGORY_MAP.items()}
+# 可识别的视频扩展名。
 VIDEO_EXTS = (".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".m4v", ".ts", ".m2ts", ".webm", ".mpg", ".mpeg")
+# SDK 缓存默认 TTL（秒）。
 CACHE_EX_SECONDS = 3600
+# ==================== 配置区域结束 ====================
 
 
-def split_config_list(value: str):
-    return [item.strip() for item in str(value or "").replace(",", ";").split(";") if item.strip()]
-
-
-DRIVE_TYPE_CONFIG = [item.lower() for item in split_config_list(os.environ.get("DRIVE_TYPE_CONFIG", "quark;uc"))]
-SOURCE_NAMES_CONFIG = split_config_list(os.environ.get("SOURCE_NAMES_CONFIG", "本地代理;服务端代理;直连"))
-EXTERNAL_SERVER_PROXY_ENABLED = str(os.environ.get("EXTERNAL_SERVER_PROXY_ENABLED", "false")).lower() == "true"
-DRIVE_ORDER = [item.lower() for item in split_config_list(os.environ.get("DRIVE_ORDER", "baidu;tianyi;quark;uc;115;xunlei;ali;123pan"))]
+def build_share_source_name(base_name: str, index: int, total: int) -> str:
+    name = str(base_name or "资源").strip() or "资源"
+    if total <= 1:
+        return name
+    return f"{name}{index}"
 
 
 def abs_url(url: str) -> str:
@@ -91,6 +118,18 @@ def clean_multiline_html(text: str) -> str:
     return value.strip()
 
 
+def normalize_vod_title(text: str) -> str:
+    value = str(text or "")
+    value = html.unescape(value)
+    value = re.sub(r"</?font[^>]*>", "", value, flags=re.I)
+    value = re.sub(r"</?fontcolor[^>]*>", "", value, flags=re.I)
+    value = re.sub(r"</?[^>]+>", "", value, flags=re.I)
+    value = clean_html(value)
+    value = re.split(r"(?:百度云|百度网盘|夸克|阿里云盘|阿里网盘|网盘下载|下载|中字)", value, maxsplit=1)[0].strip()
+    value = value.strip("《》[]【】()（） ")
+    return value or clean_html(html.unescape(text))
+
+
 def uniq(seq):
     out = []
     seen = set()
@@ -124,6 +163,50 @@ async def request_text(url: str, referer: str = None) -> str:
     if status != 200:
         raise RuntimeError(f"HTTP {status} @ {url}")
     return text
+
+
+async def request_text_via_flaresolverr(url: str, referer: str = None) -> str:
+    if not RRDYNB_FLARESOLVERR_URL:
+        raise RuntimeError("FlareSolverr URL not configured")
+
+    payload = {
+        "cmd": "request.get",
+        "url": url,
+        "maxTimeout": RRDYNB_FLARESOLVERR_TIMEOUT_MS,
+        "session": RRDYNB_FLARESOLVERR_SESSION,
+        "headers": {
+            "User-Agent": UA,
+            "Referer": referer or f"{BASE_URL}/",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        },
+    }
+    await log("info", f"[rrdynb][flaresolverr] url={url} session={RRDYNB_FLARESOLVERR_SESSION}")
+    res = await OmniBox.request(RRDYNB_FLARESOLVERR_URL, {
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        "body": json.dumps(payload, ensure_ascii=False),
+    })
+    status = int(res.get("statusCode") or 0)
+    body = res.get("body", "")
+    text = body.decode("utf-8", "ignore") if isinstance(body, (bytes, bytearray)) else str(body or "")
+    if status != 200:
+        raise RuntimeError(f"FlareSolverr HTTP {status}")
+
+    data = json.loads(text or "{}")
+    if str(data.get("status") or "").lower() != "ok":
+        raise RuntimeError(f"FlareSolverr status={data.get('status')} message={data.get('message')}")
+
+    solution = data.get("solution") or {}
+    solution_status = int(solution.get("status") or 0)
+    response_text = str(solution.get("response") or "")
+    if solution_status != 200:
+        raise RuntimeError(f"FlareSolverr solution HTTP {solution_status} @ {url}")
+    if not response_text:
+        raise RuntimeError(f"FlareSolverr empty response @ {url}")
+    return response_text
 
 
 async def get_cached_json(key: str):
@@ -476,6 +559,7 @@ async def collect_drive_videos(share_url: str, folder_id: str = "0", depth: int 
 
 
 CARD_RE = re.compile(r'<li\s+class="pure-g\s+shadow"[^>]*>(.*?)</li>', re.S | re.I)
+CATEGORY_DL_RE = re.compile(r'<dl\s+class="dl-horizontal"[^>]*>(.*?)</dl>', re.S | re.I)
 
 
 def extract_cards(text: str, type_id: str, type_name: str):
@@ -483,6 +567,7 @@ def extract_cards(text: str, type_id: str, type_name: str):
     for block in CARD_RE.findall(text):
         href_m = re.search(r'<a[^>]+class="movie-thumbnails"[^>]+href="([^"]+)"', block, re.I)
         title_m = re.search(r'<h2>\s*<a[^>]+title="([^"]+)"', block, re.S | re.I)
+        title_html_m = re.search(r'<h2>\s*<a[^>]*>(.*?)</a>', block, re.S | re.I)
         img_m = re.search(r'<img[^>]+(?:data-original|src)="([^"]+)"', block, re.I)
         brief_m = re.search(r'<div\s+class="brief"[^>]*>(.*?)</div>', block, re.S | re.I)
         date_m = re.search(r'<div\s+class="tags"[^>]*>\s*([^<\n\r]+)', block, re.S | re.I)
@@ -491,7 +576,10 @@ def extract_cards(text: str, type_id: str, type_name: str):
         href = abs_url(href_m.group(1)) if href_m else ""
         if not href:
             continue
-        title = clean_html(title_m.group(1) if title_m else "")
+        raw_title = title_m.group(1) if title_m else ""
+        if not raw_title and title_html_m:
+            raw_title = title_html_m.group(1)
+        title = normalize_vod_title(raw_title)
         brief = clean_html(brief_m.group(1) if brief_m else "")
         date = clean_html(date_m.group(1) if date_m else "")
         remarks = " | ".join([x for x in [date, f"豆瓣{clean_html(douban_m.group(1))}" if douban_m else "", f"IMDB{clean_html(imdb_m.group(1))}" if imdb_m else ""] if x])
@@ -501,6 +589,28 @@ def extract_cards(text: str, type_id: str, type_name: str):
             "vod_pic": abs_url(img_m.group(1)) if img_m else "",
             "vod_remarks": remarks,
             "vod_content": brief,
+            "type_id": type_id,
+            "type_name": type_name,
+        })
+    return cards
+
+
+def extract_category_cards(text: str, type_id: str, type_name: str):
+    cards = []
+    for block in CATEGORY_DL_RE.findall(text):
+        href_m = re.search(r'<a[^>]+class="img-wraper"[^>]+href="([^"]+)"', block, re.I)
+        title_m = re.search(r'<dd>\s*<a[^>]*>(.*?)</a>', block, re.S | re.I)
+        img_m = re.search(r'<img[^>]+src="([^"]+)"', block, re.I)
+        href = abs_url(href_m.group(1)) if href_m else ""
+        if not href:
+            continue
+        title = normalize_vod_title(title_m.group(1) if title_m else "")
+        cards.append({
+            "vod_id": href,
+            "vod_name": title or href.rsplit("/", 1)[-1],
+            "vod_pic": abs_url(img_m.group(1)) if img_m else "",
+            "vod_remarks": "",
+            "vod_content": "",
             "type_id": type_id,
             "type_name": type_name,
         })
@@ -630,12 +740,12 @@ async def category(params, context):
         await log("info", f"[rrdynb][category] cid={category_id} page={page} filters={filters} url={url}")
         text = await request_text(url)
         cfg = CATEGORY_MAP[TYPEID_TO_KEY.get(category_id, "movie")]
-        cards = extract_cards(text, cfg["type_id"], cfg["type_name"])
-        has_more = len(cards) >= 10
+        cards = extract_category_cards(text, cfg["type_id"], cfg["type_name"])
+        has_more = len(cards) > 0
         return {
             "page": page,
             "pagecount": page + 1 if has_more else page,
-            "total": page * len(cards) + (1 if has_more else 0),
+            "total": page * max(len(cards), 1) + (1 if has_more else 0),
             "list": cards,
         }
     except Exception as e:
@@ -653,7 +763,15 @@ async def search(params, context):
         if page > 1:
             return {"page": page, "pagecount": 1, "total": 0, "list": []}
         url = f"{BASE_URL}/plus/search.php?q={quote(keyword)}&pagesize=10"
-        text = await request_text(url, referer=f"{BASE_URL}/")
+        if RRDYNB_SEARCH_USE_FLARESOLVERR:
+            try:
+                text = await request_text_via_flaresolverr(url, referer=f"{BASE_URL}/")
+                await log("info", f"[rrdynb][search] flaresolverr hit len={len(text)}")
+            except Exception as fs_err:
+                await log("warn", f"[rrdynb][search] flaresolverr failed: {fs_err}")
+                text = await request_text(url, referer=f"{BASE_URL}/")
+        else:
+            text = await request_text(url, referer=f"{BASE_URL}/")
         merged = []
         for cfg in CATEGORY_MAP.values():
             merged.extend(extract_cards(text, cfg["type_id"], cfg["type_name"]))
@@ -687,8 +805,8 @@ async def detail(params, context):
         await log("info", f"[rrdynb][detail] share_count={len(share_links)}")
 
         sources = []
-        source_name_count = {}
         caller_source = resolve_caller_source(params, context)
+        total_share_links = len(share_links)
         for idx, share_url in enumerate(share_links, start=1):
             share_url = normalize_share_url(share_url)
             drive_info = None
@@ -703,12 +821,12 @@ async def detail(params, context):
                 await log("warn", f"[rrdynb][drive-info] share={share_url} err={e}")
                 drive_label = infer_drive_label(share_url)
                 drive_type = infer_drive_type(share_url)
-            source_name = drive_label or infer_drive_label(share_url)
+            base_source_name = build_share_source_name(drive_label or infer_drive_label(share_url), idx, total_share_links)
 
             episodes = []
             if share_url.startswith("http"):
                 videos = await collect_drive_videos(share_url, "0")
-                await log("info", f"[rrdynb][detail] share={source_name} videos={len(videos)}")
+                await log("info", f"[rrdynb][detail] share={base_source_name} videos={len(videos)}")
                 route_types = get_route_types(context, drive_type)
                 for route_type in route_types:
                     route_episodes = []
@@ -720,14 +838,12 @@ async def detail(params, context):
                             "size": int(file.get("size") or 0),
                         })
                     if route_episodes:
-                        display_name = source_name
+                        final_source_name = base_source_name
                         if len(route_types) > 1:
-                            display_name = f"{source_name}-{route_type}"
-                        source_name_count[display_name] = source_name_count.get(display_name, 0) + 1
-                        final_source_name = display_name if source_name_count[display_name] == 1 else f"{display_name}{source_name_count[display_name]}"
+                            final_source_name = f"{base_source_name}-{route_type}"
                         sources.append({"name": final_source_name, "episodes": route_episodes})
                 if not videos:
-                    await log("warn", f"[rrdynb][detail] skip empty drive source: {source_name} share={share_url}")
+                    await log("warn", f"[rrdynb][detail] skip empty drive source: {base_source_name} share={share_url}")
                     continue
             else:
                 kind = "link"
@@ -740,9 +856,7 @@ async def detail(params, context):
                     "name": fallback_name,
                     "playId": json.dumps({"kind": kind, "url": share_url, "name": fallback_name}, ensure_ascii=False),
                 }]
-                source_name_count[source_name] = source_name_count.get(source_name, 0) + 1
-                final_source_name = source_name if source_name_count[source_name] == 1 else f"{source_name}{source_name_count[source_name]}"
-                sources.append({"name": final_source_name, "episodes": episodes})
+                sources.append({"name": base_source_name, "episodes": episodes})
 
         sources = sort_play_sources_by_drive_order(sources)
         if len(sources) > 1 and DRIVE_ORDER:

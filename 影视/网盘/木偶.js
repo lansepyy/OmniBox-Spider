@@ -2,7 +2,7 @@
 // @author
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, cheerio
-// @version 1.2.17
+// @version 1.2.18
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/木偶.js
 
 // 引入 OmniBox SDK
@@ -1555,7 +1555,13 @@ async function play(params, context) {
       });
     }
 
-    const header = playInfo.header || {};
+    let header = playInfo.header || {};
+    const shareURLLower = String(shareURL || "").toLowerCase();
+    const isUcDrive = shareURLLower.includes("drive.uc.cn") || shareURLLower.includes("pc-api.uc.cn") || shareURLLower.includes("uc.cn/s/");
+    if (isUcDrive && routeType == "直连") {
+      header = {};
+      OmniBox.log("info", "木偶 play 命中 UC 直连特判，返回空 header");
+    }
     const finalDanmakuList = danmakuList && danmakuList.length > 0 ? danmakuList : playInfo.danmaku || [];
 
     OmniBox.log("info", `实际播放地址: ${JSON.stringify(urlsResult)}`);

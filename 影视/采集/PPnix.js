@@ -1,14 +1,16 @@
 // @name PPnix
 // @author 梦
-// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：更贴近官网
+// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox，优先返回已重写的内联 m3u8 以规避代理链路问题
 // @dependencies: axios, cheerio
-// @version 1.6.1
+// @version 1.7.3
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/PPnix.js
 
 const OmniBox = require("omnibox_sdk");
 const cheerio = require("cheerio");
 const axios = require("axios");
 const runner = require("spider_runner");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
 
 const BASE_URL = process.env.PPNIX_HOST || "https://www.ppnix.com";
 const BASE_PATH = process.env.PPNIX_LANG_PATH || "/cn";
@@ -28,7 +30,17 @@ function normalizeBasePath(path = "") {
 const LANG_PATH = normalizeBasePath(BASE_PATH);
 
 const PPNIX_SEGMENT_HOST = process.env.PPNIX_SEGMENT_HOST || "https://1.ppnix.com";
-const PPNIX_REWRITE_M3U8 = process.env.PPNIX_REWRITE_M3U8 !== "0";
+const PPNIX_REWRITE_M3U8 = process.env.PPNIX_REWRITE_M3U8 === "1";
+const PPNIX_CF_COOKIE = process.env.PPNIX_CF_COOKIE || process.env.PPNIX_COOKIE || "";
+const PPNIX_CF_AUTO = process.env.PPNIX_CF_AUTO !== "0";
+const PPNIX_CF_CACHE_KEY = process.env.PPNIX_CF_CACHE_KEY || "ppnix:cf_clearance";
+const PPNIX_CF_MAX_AGE_SECONDS = parseInt(process.env.PPNIX_CF_MAX_AGE_SECONDS || "21600", 10) || 21600;
+const PPNIX_CF_TIMEOUT_MS = parseInt(process.env.PPNIX_CF_TIMEOUT_MS || "45000", 10) || 45000;
+const PPNIX_FLARESOLVERR_URL = process.env.PPNIX_FLARESOLVERR_URL || process.env.FLARESOLVERR_URL || "http://192.168.50.50:8191/v1";
+const PPNIX_FLARESOLVERR_SESSION = process.env.PPNIX_FLARESOLVERR_SESSION || "";
+const PPNIX_FLARESOLVERR_TIMEOUT_MS = parseInt(process.env.PPNIX_FLARESOLVERR_TIMEOUT_MS || String(PPNIX_CF_TIMEOUT_MS), 10) || PPNIX_CF_TIMEOUT_MS;
+const PPNIX_ENABLE_SUBTITLES = process.env.PPNIX_ENABLE_SUBTITLES === "1";
+const execFileAsync = promisify(execFile);
 
 const SORT_MAP = {
   time: "newstime",
@@ -47,18 +59,257 @@ function joinUrl(path = "") {
   return `${BASE_URL}/${raw}`;
 }
 
+function buildCookieHeader(cookie = "") {
+  const value = text(cookie);
+  return value ? { Cookie: value } : {};
+}
+
+function toCookieString(cookieMap = {}) {
+  return Object.entries(cookieMap || {})
+    .map(([k, v]) => [text(k), text(v)])
+    .filter(([k, v]) => k && v)
+    .map(([k, v]) => `${k}=${v}`)
+    .join("; ");
+}
+
+function cookiesArrayToString(cookies = []) {
+  return (Array.isArray(cookies) ? cookies : [])
+    .map((item) => ({ name: text(item?.name || ""), value: text(item?.value || "") }))
+    .filter((item) => item.name && item.value)
+    .map((item) => `${item.name}=${item.value}`)
+    .join("; ");
+}
+
+async function getCachedCfCookie() {
+  if (text(PPNIX_CF_COOKIE)) return text(PPNIX_CF_COOKIE);
+  try {
+    const cached = await OmniBox.getCache(PPNIX_CF_CACHE_KEY);
+    return text(cached || "");
+  } catch (error) {
+    OmniBox.log("warn", `[cf] 读取缓存失败: ${error.message}`);
+    return "";
+  }
+}
+
+async function setCachedCfCookie(cookie) {
+  const value = text(cookie);
+  if (!value || text(PPNIX_CF_COOKIE)) return;
+  try {
+    await OmniBox.setCache(PPNIX_CF_CACHE_KEY, value, PPNIX_CF_MAX_AGE_SECONDS);
+  } catch (error) {
+    OmniBox.log("warn", `[cf] 写入缓存失败: ${error.message}`);
+  }
+}
+
+async function fetchCfClearanceWithFlareSolverr(targetUrl = `${BASE_URL}${LANG_PATH}/`) {
+  const endpoint = text(PPNIX_FLARESOLVERR_URL);
+  if (!endpoint) {
+    throw new Error("未配置 FlareSolverr 地址");
+  }
+
+  const payload = {
+    cmd: "request.get",
+    url: targetUrl,
+    maxTimeout: PPNIX_FLARESOLVERR_TIMEOUT_MS,
+  };
+  if (text(PPNIX_FLARESOLVERR_SESSION)) {
+    payload.session = text(PPNIX_FLARESOLVERR_SESSION);
+  }
+
+  const res = await axios.post(endpoint, payload, {
+    timeout: PPNIX_FLARESOLVERR_TIMEOUT_MS + 5000,
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent": USER_AGENT,
+    },
+    validateStatus: () => true,
+  });
+
+  if (res.status !== 200 || !res.data || res.data.status !== "ok") {
+    throw new Error(`FlareSolverr HTTP ${res.status}`);
+  }
+
+  const solution = res.data.solution || {};
+  const cookies = Array.isArray(solution.cookies) ? solution.cookies : [];
+  const cookie = cookiesArrayToString(cookies);
+  const cf = cookies.find((item) => text(item?.name) === "cf_clearance" && /ppnix\.com$/i.test(text(item?.domain || "ppnix.com")));
+
+  if (!cf?.value) {
+    throw new Error(`FlareSolverr 未返回 cf_clearance，message=${text(res.data.message || "") || "unknown"}`);
+  }
+
+  OmniBox.log("info", `[cf] FlareSolverr 已返回 cookies=${cookies.length}, ua=${text(solution.userAgent || "")}`);
+  return cookie;
+}
+
+async function fetchCfClearanceWithBrowser() {
+  const script = String.raw`
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+const http = require("http");
+const execFileAsync = promisify(execFile);
+const BASE_URL = process.env.PPNIX_BASE_URL;
+const USER_AGENT = process.env.PPNIX_USER_AGENT;
+const timeoutMs = Number(process.env.PPNIX_CF_TIMEOUT_MS || 45000);
+
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+function getJson(url) {
+  return new Promise((resolve, reject) => {
+    http.get(url, (res) => {
+      let data = "";
+      res.on("data", (c) => { data += c; });
+      res.on("end", () => {
+        try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
+      });
+    }).on("error", reject);
+  });
+}
+
+async function waitForDebugger(port, deadline) {
+  while (Date.now() < deadline) {
+    try {
+      const info = await getJson("http://127.0.0.1:" + port + "/json/version");
+      if (info && info.webSocketDebuggerUrl) return info;
+    } catch (_) {}
+    await delay(500);
+  }
+  throw new Error("等待 Chromium 调试端口超时");
+}
+
+async function readCookies(wsUrl) {
+  const ws = new WebSocket(wsUrl);
+  let seq = 0;
+  const pending = new Map();
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.id && pending.has(msg.id)) {
+      pending.get(msg.id)(msg);
+      pending.delete(msg.id);
+    }
+  };
+  await new Promise((resolve, reject) => {
+    ws.onopen = resolve;
+    ws.onerror = reject;
+  });
+  const send = (method, params = {}) => new Promise((resolve) => {
+    const id = ++seq;
+    pending.set(id, resolve);
+    ws.send(JSON.stringify({ id, method, params }));
+  });
+  const res = await send("Storage.getCookies", {});
+  ws.close();
+  return (res.result && res.result.cookies) || [];
+}
+
+(async () => {
+  const port = 9223 + Math.floor(Math.random() * 200);
+  const userDataDir = await execFileAsync("mktemp", ["-d", "/tmp/ppnix-cf-XXXXXX"]);
+  const profileDir = String(userDataDir.stdout || "").trim();
+  const chrome = ["/snap/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/chromium"];
+  const bin = chrome.find(Boolean);
+  if (!bin) throw new Error("未找到 Chromium");
+
+  const child = execFile(bin, [
+    "--headless=new",
+    "--disable-gpu",
+    "--no-sandbox",
+    "--user-data-dir=" + profileDir,
+    "--remote-debugging-port=" + port,
+    "--user-agent=" + USER_AGENT,
+    BASE_URL + "/cn/"
+  ], { stdio: "ignore" });
+
+  try {
+    const deadline = Date.now() + timeoutMs;
+    const version = await waitForDebugger(port, deadline);
+    while (Date.now() < deadline) {
+      const cookies = await readCookies(version.webSocketDebuggerUrl);
+      const hit = cookies.find((c) => c && c.name === "cf_clearance" && String(c.domain || "").includes("ppnix.com"));
+      if (hit && hit.value) {
+        process.stdout.write("cf_clearance=" + hit.value);
+        return;
+      }
+      await delay(1200);
+    }
+    throw new Error("未在时限内获取到 cf_clearance");
+  } finally {
+    try { child.kill("SIGKILL"); } catch (_) {}
+  }
+})().catch((error) => {
+  console.error(error && error.message ? error.message : String(error));
+  process.exit(1);
+});`;
+
+  const { stdout, stderr } = await execFileAsync("node", ["-e", script], {
+    timeout: PPNIX_CF_TIMEOUT_MS,
+    env: {
+      ...process.env,
+      PPNIX_BASE_URL: BASE_URL,
+      PPNIX_USER_AGENT: USER_AGENT,
+      PPNIX_CF_TIMEOUT_MS: String(PPNIX_CF_TIMEOUT_MS),
+    },
+    maxBuffer: 1024 * 1024,
+  });
+
+  const cookie = text(stdout || "");
+  if (!/^cf_clearance=/.test(cookie)) {
+    throw new Error(text(stderr || "未获取到 cf_clearance"));
+  }
+  return cookie;
+}
+
+async function ensureCfCookie(forceRefresh = false, targetUrl = `${BASE_URL}${LANG_PATH}/`) {
+  if (text(PPNIX_CF_COOKIE)) return text(PPNIX_CF_COOKIE);
+  if (!forceRefresh) {
+    const cached = await getCachedCfCookie();
+    if (cached) return cached;
+  }
+  if (!PPNIX_CF_AUTO) return "";
+
+  let cookie = "";
+  try {
+    OmniBox.log("info", `[cf] 开始通过 FlareSolverr 自动获取 cf_clearance`);
+    cookie = await fetchCfClearanceWithFlareSolverr(targetUrl);
+  } catch (error) {
+    OmniBox.log("warn", `[cf] FlareSolverr 获取失败，回退 headless Chromium: ${error.message}`);
+    cookie = await fetchCfClearanceWithBrowser();
+  }
+
+  if (cookie) {
+    await setCachedCfCookie(cookie);
+    OmniBox.log("info", `[cf] 已自动获取 cf_clearance，长度=${cookie.length}`);
+  }
+  return cookie;
+}
+
 async function requestPage(path) {
   const url = joinUrl(path);
   OmniBox.log("info", `[request] ${url}`);
-  const res = await axios.get(url, {
+  let cookie = await getCachedCfCookie();
+  let res = await axios.get(url, {
     timeout: 20000,
     headers: {
       "User-Agent": USER_AGENT,
       "Referer": `${BASE_URL}${LANG_PATH}/`,
       "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      ...buildCookieHeader(cookie),
     },
     validateStatus: () => true,
   });
+
+  if ((res.status === 403 || res.status === 503) && PPNIX_CF_AUTO) {
+    cookie = await ensureCfCookie(!cookie, url);
+    res = await axios.get(url, {
+      timeout: 20000,
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Referer": `${BASE_URL}${LANG_PATH}/`,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ...buildCookieHeader(cookie),
+      },
+      validateStatus: () => true,
+    });
+  }
 
   if (res.status !== 200 || !res.data) {
     throw new Error(`HTTP ${res.status}`);
@@ -160,14 +411,28 @@ function parsePlayId(playId) {
 }
 
 async function fetchText(url, headers = {}) {
-  const res = await axios.get(url, {
+  let cookie = await getCachedCfCookie();
+  let res = await axios.get(url, {
     timeout: 20000,
     headers: {
       "User-Agent": USER_AGENT,
       ...headers,
+      ...buildCookieHeader(cookie),
     },
     validateStatus: () => true,
   });
+  if ((res.status === 403 || res.status === 503) && PPNIX_CF_AUTO) {
+    cookie = await ensureCfCookie(!cookie, url);
+    res = await axios.get(url, {
+      timeout: 20000,
+      headers: {
+        "User-Agent": USER_AGENT,
+        ...headers,
+        ...buildCookieHeader(cookie),
+      },
+      validateStatus: () => true,
+    });
+  }
   if (res.status !== 200) {
     throw new Error(`HTTP ${res.status}`);
   }
@@ -285,6 +550,13 @@ function rewritePpnixM3u8LikeWeb(m3u8Text) {
   const keyUrl = `${BASE_URL}/info/m3u8/key`;
   return String(m3u8Text || "")
     .replace(/URI="\.\.\/key"/g, `URI="${keyUrl}"`);
+}
+
+function rewritePpnixM3u8ForTvbox(m3u8Text) {
+  const keyUrl = `${BASE_URL}/info/m3u8/key`;
+  return String(m3u8Text || "")
+    .replace(/URI="\.\.\/key"/g, `URI="${keyUrl}"`)
+    .replace(/https:\/\/ipfs\.ppnix\.com\/ipfs\//g, `${PPNIX_SEGMENT_HOST}/ipfs/`);
 }
 
 async function home(params, context) {
@@ -441,22 +713,45 @@ async function play(params, context) {
     }
 
     const referer = text(meta.referer || `${BASE_URL}${LANG_PATH}/`);
-    const header = {
+    const from = text(context?.from || "") || "unknown";
+    const shouldUseLeanHeader = from === "tvbox";
+    const cfCookie = shouldUseLeanHeader ? "" : await ensureCfCookie(false, referer);
+    const header = shouldUseLeanHeader ? {} : {
       Referer: referer,
       Origin: BASE_URL,
       "User-Agent": USER_AGENT,
+      ...buildCookieHeader(cfCookie),
     };
 
     const sourceUrl = `${BASE_URL}/info/m3u8/${infoId}/${encodeURIComponent(param)}.m3u8`;
     const episodeName = text(meta.episodeName || param || "播放");
-    const subtitles = buildSubtitleSelector(infoId, param);
+    const subtitles = PPNIX_ENABLE_SUBTITLES ? buildSubtitleSelector(infoId, param) : [];
+
+    if (from === "tvbox") {
+      try {
+        const rawM3u8 = await fetchText(sourceUrl, {});
+        const rewritten = rewritePpnixM3u8ForTvbox(rawM3u8);
+        const finalUrl = buildM3u8DataUrl(rewritten);
+        OmniBox.log("info", `[play] 返回 tvbox 专用内联 m3u8: infoId=${infoId}, param=${param}, from=${from}, leanHeader=${shouldUseLeanHeader ? "yes" : "no"}, cookie=${cfCookie ? "yes" : "no"}, subtitles=${subtitles.length}`);
+        return {
+          urls: [{ name: episodeName, url: finalUrl }],
+          flag: "PPnix",
+          header,
+          parse: 0,
+          danmaku: [],
+          subtitles,
+        };
+      } catch (error) {
+        OmniBox.log("warn", `[play] tvbox 内联 m3u8 失败，回退原始地址: ${error.message}`);
+      }
+    }
 
     if (PPNIX_REWRITE_M3U8) {
       try {
         const rawM3u8 = await fetchText(sourceUrl, header);
         const rewritten = rewritePpnixM3u8LikeWeb(rawM3u8);
         const finalUrl = buildM3u8DataUrl(rewritten);
-        OmniBox.log("info", `[play] 已按官网链路重写 m3u8: infoId=${infoId}, param=${param}, keepIpfsHost=true`);
+        OmniBox.log("info", `[play] 返回重写 data-url: infoId=${infoId}, param=${param}, from=${from}, leanHeader=${shouldUseLeanHeader ? "yes" : "no"}, cookie=${cfCookie ? "yes" : "no"}, subtitles=${subtitles.length}`);
         return {
           urls: [{ name: episodeName, url: finalUrl }],
           flag: "PPnix",
@@ -470,6 +765,7 @@ async function play(params, context) {
       }
     }
 
+    OmniBox.log("info", `[play] 返回原始 m3u8: infoId=${infoId}, param=${param}, from=${from}, leanHeader=${shouldUseLeanHeader ? "yes" : "no"}, cookie=${cfCookie ? "yes" : "no"}, subtitles=${subtitles.length}`);
     return {
       urls: [{ name: episodeName, url: sourceUrl }],
       flag: "PPnix",

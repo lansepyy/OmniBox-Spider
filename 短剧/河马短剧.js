@@ -2,7 +2,7 @@
 // @author
 // @description
 // @dependencies: axios
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/短剧/河马短剧.js
 
 /**
@@ -34,6 +34,15 @@ const hemaConfig = {
         "Referer": "https://www.kuaikaw.cn",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+    },
+    apiHeaders: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+        "Referer": "https://www.kuaikaw.cn/search",
+        "Origin": "https://www.kuaikaw.cn",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "pname": "www.kuaikaw.cn"
     },
     timeout: 12000
 };
@@ -129,6 +138,18 @@ const isDirectPlayable = (url) => {
 const toPage = (value, def) => {
     const p = parseInt(value, 10);
     return Number.isNaN(p) ? def : p;
+};
+
+const buildTmpId = () => Math.random().toString(36).slice(2, 18);
+
+const normalizeSearchBook = (book) => {
+    if (!book || !book.bookId) return null;
+    return {
+        vod_id: `/drama/${book.bookId}`,
+        vod_name: book.bookName,
+        vod_pic: book.coverWap,
+        vod_remarks: `${book.statusDesc || (book.status === 1 ? "完本" : "更新中") || ""} ${book.totalChapterNum || ""}集`.trim()
+    };
 };
 
 // ========== 核心逻辑 ==========
@@ -311,6 +332,41 @@ const getCategoryList = async (tid, page = 1) => {
  */
 const searchContent = async (key, page = 1) => {
     try {
+        const apiUrl = `${hemaConfig.siteUrl}/seo/video/6007`;
+        const payload = {
+            sourceType: 1,
+            keyword: key,
+            index: toPage(page, 1)
+        };
+        const headers = {
+            ...hemaConfig.apiHeaders,
+            Referer: `${hemaConfig.siteUrl}/search?searchValue=${encodeURIComponent(key)}`,
+            tmpid: buildTmpId()
+        };
+
+        logInfo("搜索接口请求", { apiUrl, payload });
+        const apiRes = await axiosInstance.post(apiUrl, payload, { headers });
+        const apiData = apiRes && apiRes.data ? apiRes.data : {};
+        const result = apiData.data || {};
+        const apiBookList = Array.isArray(result.bookList) ? result.bookList : [];
+
+        if (apiRes.status === 200 && apiData.retCode === 0) {
+            const list = apiBookList.map(normalizeSearchBook).filter(Boolean);
+            const total = Number(result.totalSize) || list.length;
+            return {
+                list,
+                page: toPage(page, 1),
+                pagecount: Math.max(1, Math.ceil(total / 10)),
+                limit: 10,
+                total
+            };
+        }
+
+        logInfo("搜索接口返回非成功状态，回退页面解析", {
+            status: apiRes.status,
+            retCode: apiData.retCode
+        });
+
         const url = `${hemaConfig.siteUrl}/search?searchValue=${encodeURIComponent(key)}&page=${page}`;
         const html = await requestHtml(url);
         const json = parseNextData(html);
@@ -318,25 +374,14 @@ const searchContent = async (key, page = 1) => {
 
         const pageProps = json.props && json.props.pageProps ? json.props.pageProps : {};
         const bookList = pageProps.bookList || [];
-        const list = [];
-
-        bookList.forEach((book) => {
-            if (book.bookId) {
-                list.push({
-                    vod_id: `/drama/${book.bookId}`,
-                    vod_name: book.bookName,
-                    vod_pic: book.coverWap,
-                    vod_remarks: `${book.statusDesc || ""} ${book.totalChapterNum || ""}集`.trim()
-                });
-            }
-        });
+        const list = bookList.map(normalizeSearchBook).filter(Boolean);
 
         return {
             list,
             page: toPage(page, 1),
             pagecount: pageProps.pages || 1,
             limit: 20,
-            total: 999
+            total: list.length
         };
     } catch (error) {
         logError("搜索失败", error);

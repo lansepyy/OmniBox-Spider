@@ -1,7 +1,7 @@
 // @name 剧迷115
 // @author 梦
-// @description 影视站：gimy115.top，支持首页、分类、搜索、详情与网盘线路提取；Cookie 支持环境变量配置
-// @version 1.1.0
+// @description 影视站：gimy115.top，支持首页、分类、搜索、详情与网盘线路提取；支持刮削、弹幕、播放记录；Cookie 支持环境变量配置
+// @version 1.2.0
 // @dependencies cheerio
 
 const OmniBox = require("omnibox_sdk");
@@ -728,6 +728,7 @@ async function detail(params, context) {
 
     const detailMeta = extractDetailMeta($, detailUrl);
     const playSources = [];
+    const filesForScraping = [];
     const driveTypeCountMap = await collectDriveTypeCountMap(downloadGroups);
     const driveTypeCurrentIndexMap = {};
 
@@ -829,15 +830,30 @@ async function detail(params, context) {
             const episodes = directVideoFiles.map((file) => {
               const episodeName = decodeHtml(String(file.file_name || "资源").replace(/\.[^.]+$/, "")) || "资源";
               const size = formatFileSize(file.size);
+              const playMeta = encodePlayMeta({
+                sid: detailUrl,
+                t: detailMeta.vod_name || "",
+                p: detailMeta.vod_pic || "",
+                e: episodeName,
+              });
+              const drivePlayId = buildDrivePlayId({
+                shareURL: normalizedShareURL,
+                fileId: file.fid,
+                episodeName,
+                sourceName: sourceBaseName,
+                routeType,
+              });
+              const finalPlayId = playMeta ? `${drivePlayId}|||${playMeta}` : drivePlayId;
+              if (!filesForScraping.some((item) => item.fid === `${normalizedShareURL}|${file.fid}`)) {
+                filesForScraping.push({
+                  file_name: episodeName,
+                  fid: `${normalizedShareURL}|${file.fid}`,
+                  file_id: `${normalizedShareURL}|${file.fid}`,
+                });
+              }
               return {
                 name: size ? `${episodeName} [${size}]` : episodeName,
-                playId: buildDrivePlayId({
-                  shareURL: normalizedShareURL,
-                  fileId: file.fid,
-                  episodeName,
-                  sourceName: sourceBaseName,
-                  routeType,
-                }),
+                playId: finalPlayId,
               };
             });
             playSources.push({
@@ -854,6 +870,43 @@ async function detail(params, context) {
     const vod_play_sources = playSources.length
       ? playSources
       : [{ name: "详情页", episodes: [{ name: "打开详情页", playId: `page|||${encodeURIComponent(detailUrl)}` }] }];
+
+    if (filesForScraping.length > 0) {
+      try {
+        await OmniBox.log("info", `[Gimy115][detail] 开始统一刮削: vodId=${detailUrl}, files=${filesForScraping.length}`);
+        await OmniBox.processScraping(detailUrl, detailMeta.vod_name || "", detailMeta.vod_name || "", filesForScraping);
+        const metadata = await OmniBox.getScrapeMetadata(detailUrl);
+        const scrapeData = metadata?.scrapeData || null;
+        const videoMappings = Array.isArray(metadata?.videoMappings) ? metadata.videoMappings : [];
+
+        if (scrapeData || videoMappings.length > 0) {
+          for (const source of vod_play_sources) {
+            for (const episode of source.episodes || []) {
+              const parts = String(episode.playId || "").split("|||");
+              const drivePayload = parseDrivePlayId(parts[0] || "");
+              const formattedId = `${String(drivePayload?.shareURL || "")}|${String(drivePayload?.fileId || "")}`;
+              const matchedMapping = videoMappings.find((mapping) => mapping && mapping.fileId === formattedId);
+              if (matchedMapping && scrapeData) {
+                const newName = buildScrapedFileName(scrapeData, matchedMapping, String(episode.name || ""));
+                if (newName && newName !== episode.name) {
+                  episode.name = newName;
+                }
+              }
+            }
+          }
+
+          if (scrapeData) {
+            if (scrapeData.title) detailMeta.vod_name = scrapeData.title;
+            if (scrapeData.posterPath) detailMeta.vod_pic = `https://image.tmdb.org/t/p/w500${scrapeData.posterPath}`;
+            if (scrapeData.overview) detailMeta.vod_content = scrapeData.overview;
+            if (scrapeData.releaseDate) detailMeta.vod_year = String(scrapeData.releaseDate).slice(0, 4);
+            if (scrapeData.voteAverage) detailMeta.vod_douban_score = Number(scrapeData.voteAverage).toFixed(1);
+          }
+        }
+      } catch (error) {
+        await OmniBox.log("warn", `[Gimy115][detail] 统一刮削失败: ${error.message}`);
+      }
+    }
 
     await OmniBox.log("info", `[Gimy115][detail] input=${inputUrl} detail=${detailUrl} shareGroups=${downloadGroups.length} playSources=${playSources.length}`);
     return {
@@ -874,14 +927,68 @@ async function play(params, context) {
     const playId = String(params.playId || params.id || params.url || "").trim();
     if (!playId) return { parse: 0, url: "", urls: [], header: {}, headers: {}, flag: "gimy115" };
 
-    const driveMeta = parseDrivePlayId(playId);
+    const [mainPlayId, metaPart = ""] = playId.split("|||");
+    const playMeta = decodePlayMeta(metaPart);
+    const driveMeta = parseDrivePlayId(mainPlayId);
     if (driveMeta && driveMeta.shareURL && driveMeta.fileId) {
       const shareURL = String(driveMeta.shareURL || "");
       const fileId = String(driveMeta.fileId || "");
       const routeType = String(driveMeta.routeType || (String(context?.from || "web") === "web" ? "服务端代理" : "直连"));
-      const episodeName = String(driveMeta.episodeName || "播放");
+      const episodeName = String(playMeta.e || driveMeta.episodeName || "播放");
       await OmniBox.log("info", `[Gimy115][play] drive route=${routeType} shareURL=${shareURL} fileId=${fileId}`);
-      const playInfo = await OmniBox.getDriveVideoPlayInfo(shareURL, fileId, routeType);
+
+      const metadataPromise = (async () => {
+        const result = {
+          danmakuList: [],
+          scrapeTitle: "",
+          scrapePic: "",
+          episodeNumber: null,
+          episodeName,
+        };
+        const vodId = String(playMeta.sid || params.vodId || params.videoId || "").trim();
+        if (!vodId) return result;
+
+        try {
+          const metadata = await OmniBox.getScrapeMetadata(vodId);
+          if (!metadata || !metadata.scrapeData || !Array.isArray(metadata.videoMappings)) {
+            await OmniBox.log("info", `[Gimy115][play] 弹幕匹配跳过: metadata 不完整, vodId=${vodId}`);
+            return result;
+          }
+          const formattedId = `${shareURL}|${fileId}`;
+          const matchedMapping = metadata.videoMappings.find((mapping) => mapping && mapping.fileId === formattedId);
+          const scrapeData = metadata.scrapeData || {};
+          result.scrapeTitle = scrapeData.title || "";
+          if (scrapeData.posterPath) {
+            result.scrapePic = `https://image.tmdb.org/t/p/w500${scrapeData.posterPath}`;
+          }
+          if (!matchedMapping) return result;
+          result.episodeNumber = matchedMapping.episodeNumber ?? null;
+          if (matchedMapping.episodeName && !result.episodeName) {
+            result.episodeName = matchedMapping.episodeName;
+          }
+          const fileName = buildScrapedFileName(scrapeData, matchedMapping, result.episodeName || "") || buildFileNameForDanmu(scrapeData.title || playMeta.t || "", result.episodeName || "");
+          if (fileName) {
+            await OmniBox.log("info", `[Gimy115][play] 生成 fileName 用于弹幕匹配: ${fileName}`);
+            const matchedDanmaku = await OmniBox.getDanmakuByFileName(fileName);
+            if (Array.isArray(matchedDanmaku) && matchedDanmaku.length > 0) {
+              result.danmakuList = matchedDanmaku;
+            }
+          }
+        } catch (error) {
+          await OmniBox.log("warn", `[Gimy115][play] 弹幕匹配失败: ${error.message}`);
+        }
+
+        return result;
+      })();
+
+      const [playInfoResult, metadataResult] = await Promise.allSettled([
+        OmniBox.getDriveVideoPlayInfo(shareURL, fileId, routeType),
+        metadataPromise,
+      ]);
+      if (playInfoResult.status !== "fulfilled") {
+        throw new Error(playInfoResult.reason && playInfoResult.reason.message ? playInfoResult.reason.message : `未获取到网盘播放地址: ${shareURL}`);
+      }
+      const playInfo = playInfoResult.value;
       const urlsRaw = Array.isArray(playInfo?.urls) ? playInfo.urls : Array.isArray(playInfo?.url) ? playInfo.url : [];
       const urls = urlsRaw.map((item) => ({
         name: String(item?.name || episodeName || "播放"),
@@ -889,6 +996,41 @@ async function play(params, context) {
       })).filter((item) => item.url);
       if (urls.length) {
         const header = playInfo?.header || playInfo?.headers || {};
+        let danmakuList = playInfo?.danmaku;
+        let scrapeTitle = "";
+        let scrapePic = "";
+        let episodeNumber = null;
+        let finalEpisodeName = episodeName;
+        if (metadataResult.status === "fulfilled" && metadataResult.value) {
+          danmakuList = metadataResult.value.danmakuList?.length ? metadataResult.value.danmakuList : danmakuList;
+          scrapeTitle = metadataResult.value.scrapeTitle || "";
+          scrapePic = metadataResult.value.scrapePic || "";
+          episodeNumber = metadataResult.value.episodeNumber ?? null;
+          finalEpisodeName = metadataResult.value.episodeName || finalEpisodeName;
+        }
+
+        if (context?.sourceId) {
+          OmniBox.addPlayHistory({
+            vodId: String(playMeta.sid || params.vodId || params.videoId || shareURL),
+            title: params.title || scrapeTitle || playMeta.t || shareURL,
+            pic: params.pic || scrapePic || playMeta.p || "",
+            episode: playId,
+            sourceId: context.sourceId,
+            episodeNumber,
+            episodeName: finalEpisodeName,
+          })
+            .then((added) => {
+              if (added) {
+                OmniBox.log("info", `[Gimy115][play] 已添加观看记录: ${params.title || scrapeTitle || playMeta.t || shareURL}`);
+              } else {
+                OmniBox.log("info", `[Gimy115][play] 观看记录已存在,跳过添加: ${params.title || scrapeTitle || playMeta.t || shareURL}`);
+              }
+            })
+            .catch((error) => {
+              OmniBox.log("warn", `[Gimy115][play] 添加观看记录失败: ${error.message}`);
+            });
+        }
+
         return {
           parse: Number(playInfo?.parse || 0),
           url: String(playInfo?.url || urls[0].url || ""),
@@ -896,7 +1038,7 @@ async function play(params, context) {
           header,
           headers: header,
           flag: String(playInfo?.flag || routeType || "drive"),
-          danmaku: playInfo?.danmaku,
+          danmaku: danmakuList,
         };
       }
       throw new Error(`未获取到网盘播放地址: ${shareURL}`);
@@ -905,97 +1047,29 @@ async function play(params, context) {
     if (playId.startsWith("denied|||")) {
       const parts = playId.split("|||");
       const deniedUrl = decodeURIComponent(parts[1] || "");
-      const message = decodeURIComponent(parts[2] || "当前页面需要更高权限或有效 Cookie");
       return {
-        parse: 0,
-        url: "",
-        urls: [],
-        flag: "permission-denied",
-        header: {},
-        headers: {},
-        message: `Gimy115 当前返回权限页：${message}`,
-        error: `Gimy115 当前返回权限页：${message}`,
-        note: `请配置环境变量 GIMY115_COOKIE，或确认该资源是否仅会员可见：${deniedUrl}`,
+        parse: 1,
+        url: deniedUrl,
+        urls: [{ name: "权限页", url: deniedUrl }],
+        header: getHeaders(deniedUrl),
+        headers: getHeaders(deniedUrl),
+        flag: "denied",
       };
     }
 
     if (playId.startsWith("page|||")) {
       const pageUrl = decodeURIComponent(playId.slice("page|||".length));
-      const header = getHeaders(pageUrl, { Origin: BASE_URL });
       return {
         parse: 1,
         url: pageUrl,
         urls: [{ name: "详情页", url: pageUrl }],
-        header,
-        headers: header,
+        header: getHeaders(pageUrl),
+        headers: getHeaders(pageUrl),
         flag: "page",
       };
     }
 
-    const pageUrl = /^https?:\/\//i.test(playId) ? playId : absUrl(playId);
-    const html = await requestText(pageUrl, { referer: pageUrl });
-
-    if (isPermissionDenied(html)) {
-      const msg = extractPermissionMessage(html);
-      return {
-        parse: 0,
-        url: "",
-        urls: [],
-        flag: "permission-denied",
-        header: {},
-        headers: {},
-        message: `Gimy115 当前返回权限页：${msg}`,
-        error: `Gimy115 当前返回权限页：${msg}`,
-      };
-    }
-
-    const m = html.match(/var\s+player_data\s*=\s*(\{[\s\S]*?\})\s*<\/script>/i);
-    if (m) {
-      try {
-        const playerData = JSON.parse(m[1]);
-        const rawUrl = String(playerData.url || "").trim();
-        if (rawUrl) {
-          const header = getHeaders(pageUrl, { Origin: BASE_URL });
-          return {
-            parse: 1,
-            url: rawUrl,
-            urls: [{ name: decodeHtml(playerData.from || "播放"), url: rawUrl }],
-            header,
-            headers: header,
-            flag: String(playerData.from || "page"),
-          };
-        }
-      } catch (e) {
-        await OmniBox.log("warn", `[Gimy115][play] player_data parse failed: ${e.message}`);
-      }
-    }
-
-    try {
-      const sniffed = await OmniBox.sniffVideo(pageUrl, getHeaders(pageUrl));
-      if (sniffed && sniffed.url) {
-        const header = sniffed.header || getHeaders(pageUrl, { Origin: BASE_URL });
-        return {
-          parse: 0,
-          url: sniffed.url,
-          urls: [{ name: "嗅探播放", url: sniffed.url }],
-          header,
-          headers: header,
-          flag: "sniff",
-        };
-      }
-    } catch (e) {
-      await OmniBox.log("warn", `[Gimy115][play] sniff failed: ${e.message}`);
-    }
-
-    const header = getHeaders(pageUrl, { Origin: BASE_URL });
-    return {
-      parse: 1,
-      url: pageUrl,
-      urls: [{ name: "播放页", url: pageUrl }],
-      header,
-      headers: header,
-      flag: "page",
-    };
+    return { parse: 0, url: playId, urls: [{ name: "播放", url: playId }], header: {}, headers: {}, flag: "gimy115" };
   } catch (e) {
     await OmniBox.log("error", `[Gimy115][play] ${e.message}`);
     return { parse: 0, url: "", urls: [], header: {}, headers: {}, flag: "gimy115" };

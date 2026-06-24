@@ -2,7 +2,7 @@
 // @author 
 // @description 刮削：支持，弹幕：支持，播放记录：支持
 // @dependencies: axios, cheerio
-// @version 1.0.7
+// @version 1.0.8
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/快映.js
 
 // 引入 OmniBox SDK
@@ -32,7 +32,7 @@ function splitConfigList(value) {
 }
 
 // 网站地址(可以通过环境变量配置,支持多个域名用逗号/分号分割)
-const WEB_SITE_CONFIG = process.env.WEB_SITE_XIAOBAN || "http://154.201.83.50:12512;http://xsayang.fun:12512";
+const WEB_SITE_CONFIG = process.env.WEB_SITE_XIAOBAN || "http://38.76.197.172:12521;http://154.201.83.50:12512;http://xsayang.fun:12512";
 const WEB_SITES = splitConfigList(WEB_SITE_CONFIG);
 // 读取环境变量:支持多个网盘类型,用逗号/分号分割
 const DRIVE_TYPE_CONFIG = splitConfigList(process.env.DRIVE_TYPE_CONFIG || "quark;uc");

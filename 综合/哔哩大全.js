@@ -1,14 +1,15 @@
 // @name 哔哩大全
 // @author 
 // @description 弹幕：支持
-// @dependencies: axios
-// @version 1.1.0
+// @dependencies: axios, crypto
+// @version 1.2.0
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/综合/哔哩大全.js
 
 /**
  * 哔哩大全 - OmniBox 爬虫脚本（模板化版本）
  */
 const axios = require("axios");
+const crypto = require("crypto");
 const OmniBox = require("omnibox_sdk");
 
 // ==================== 配置区域 ====================
@@ -19,10 +20,211 @@ const BILI_HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   Referer: "https://www.bilibili.com",
+  Origin: "https://www.bilibili.com",
+  "Sec-Fetch-Site": "same-site",
+  "Sec-Fetch-Mode": "cors",
+  "Sec-Fetch-Dest": "empty",
   ...(BILI_COOKIE ? { Cookie: BILI_COOKIE } : {}),
 };
 
 const isLoggedIn = () => Boolean(BILI_COOKIE && BILI_COOKIE.includes("SESSDATA="));
+
+const MIXIN_KEY_ENC_TAB = [
+  46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+  27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 17, 6, 28,
+];
+
+function getMixinKey(raw) {
+  return MIXIN_KEY_ENC_TAB.map((n) => raw[n]).join("").substring(0, 32);
+}
+
+let _wbiKeysCache = null;
+let _searchHeadersCache = null;
+
+function generateBuvid3() {
+  const now = Date.now();
+  const rand = Math.random().toString(16).substring(2, 10);
+  const ts = now.toString(16);
+  return `${ts}${rand}`;
+}
+
+function generateBuvid4() {
+  const now = Date.now();
+  const rand = Math.random().toString(16).substring(2, 14);
+  const ts = now.toString(16);
+  return `X${ts}${rand}`;
+}
+
+async function initSearchHeaders() {
+  if (_searchHeadersCache) return _searchHeadersCache;
+  let cookie = BILI_COOKIE || "";
+  if (!cookie.includes("buvid3")) {
+    cookie += `${cookie ? "; " : ""}buvid3=${generateBuvid3()}`;
+  }
+  if (!cookie.includes("buvid4")) {
+    cookie += `; buvid4=${generateBuvid4()}`;
+  }
+  _searchHeadersCache = {
+    "User-Agent": BILI_HEADERS["User-Agent"],
+    Referer: "https://search.bilibili.com/all?keyword=1",
+    Origin: "https://search.bilibili.com",
+    Cookie: cookie,
+  };
+  return _searchHeadersCache;
+}
+
+async function getWbiKeys() {
+  if (_wbiKeysCache) return _wbiKeysCache;
+  try {
+    const navHeaders = await initSearchHeaders();
+    const { data } = await axios.get("https://api.bilibili.com/x/web-interface/nav", {
+      headers: navHeaders,
+    });
+    logInfo(`nav接口 code: ${data?.code}, message: ${data?.message}`);
+    const { wbi_img: { img_url, sub_url } = {} } = data?.data || {};
+    const imgKey = (img_url || "").split("/").pop().split(".")[0] || "";
+    const subKey = (sub_url || "").split("/").pop().split(".")[0] || "";
+    logInfo(`获取WbiKeys imgKey: ${imgKey}, subKey: ${subKey}`);
+    if (!imgKey || !subKey) {
+      logInfo(`nav data.data keys: ${JSON.stringify(data?.data ? Object.keys(data.data) : []).substring(0, 300)}`);
+      logInfo(`wbi_img: ${JSON.stringify(data?.data?.wbi_img).substring(0, 300)}`);
+    }
+    _wbiKeysCache = { imgKey, subKey };
+    return _wbiKeysCache;
+  } catch (err) {
+    logError("获取WbiKeys失败", err);
+    return { imgKey: "", subKey: "" };
+  }
+}
+
+async function signWbiParams(params) {
+  const { imgKey, subKey } = await getWbiKeys();
+  const mixinKey = getMixinKey(imgKey + subKey);
+  const wts = Math.floor(Date.now() / 1000);
+  const sortedParams = Object.keys(params)
+    .sort()
+    .reduce((obj, key) => {
+      if (params[key] !== undefined && params[key] !== null) {
+        obj[key] = params[key];
+      }
+      return obj;
+    }, {});
+  sortedParams.wts = wts;
+  const query = Object.entries(sortedParams)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join("&");
+  const w_rid = crypto.createHash("md5").update(query + mixinKey).digest("hex");
+  return { ...sortedParams, w_rid };
+}
+
+function xmlEscape(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function cdata(value) {
+  return `<![CDATA[${String(value ?? "").replace(/\]\]>/g, "]]]]><![CDATA[>")}]]>`;
+}
+
+function dashBaseUrl(item) {
+  return item?.base_url || item?.baseUrl || "";
+}
+
+function selectBestDashVideo(videos = []) {
+  let targetVideos = videos.filter((v) => v.codecid === 7 || (v.codecs && v.codecs.startsWith("avc")));
+  if (targetVideos.length === 0) targetVideos = videos;
+
+  return [...targetVideos].sort((a, b) => {
+    if ((b.id || 0) !== (a.id || 0)) return (b.id || 0) - (a.id || 0);
+    if ((b.bandwidth || 0) !== (a.bandwidth || 0)) return (b.bandwidth || 0) - (a.bandwidth || 0);
+    return (b.width || 0) - (a.width || 0);
+  })[0];
+}
+
+function buildMpd(dash) {
+  const duration = Number(dash?.duration || 0);
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT1.5S" mediaPresentationDuration="PT${xmlEscape(duration)}S">`,
+    "  <Period>",
+  ];
+
+  const bestVideo = selectBestDashVideo(dash?.video || []);
+  const videos = bestVideo ? [bestVideo] : [];
+  if (videos.length) {
+    lines.push('    <AdaptationSet mimeType="video/mp4" contentType="video" subsegmentAlignment="true" subsegmentStartsWithSAP="1">');
+    for (const video of videos) {
+      lines.push(
+        `      <Representation id="${xmlEscape(video.id)}" codecs="${xmlEscape(video.codecs || "avc1.64001E")}" bandwidth="${xmlEscape(video.bandwidth || 0)}" width="${xmlEscape(video.width || 0)}" height="${xmlEscape(video.height || 0)}" frameRate="${xmlEscape(video.frame_rate || "")}">`,
+      );
+      lines.push(`        <BaseURL>${cdata(dashBaseUrl(video))}</BaseURL>`);
+      if (video.SegmentBase?.Initialization) {
+        lines.push(`        <SegmentBase indexRange="${xmlEscape(video.SegmentBase.indexRange || "")}">`);
+        lines.push(`          <Initialization range="${xmlEscape(video.SegmentBase.Initialization)}"/>`);
+        lines.push("        </SegmentBase>");
+      }
+      lines.push("      </Representation>");
+    }
+    lines.push("    </AdaptationSet>");
+  }
+
+  const audios = Array.isArray(dash?.audio) ? dash.audio : [];
+  if (audios.length) {
+    lines.push('    <AdaptationSet mimeType="audio/mp4" contentType="audio" subsegmentAlignment="true" subsegmentStartsWithSAP="1">');
+    for (const audio of audios) {
+      lines.push(
+        `      <Representation id="${xmlEscape(audio.id)}" codecs="${xmlEscape(audio.codecs || "mp4a.40.2")}" bandwidth="${xmlEscape(audio.bandwidth || 0)}">`,
+      );
+      lines.push(`        <BaseURL>${cdata(dashBaseUrl(audio))}</BaseURL>`);
+      if (audio.SegmentBase?.Initialization) {
+        lines.push(`        <SegmentBase indexRange="${xmlEscape(audio.SegmentBase.indexRange || "")}">`);
+        lines.push(`          <Initialization range="${xmlEscape(audio.SegmentBase.Initialization)}"/>`);
+        lines.push("        </SegmentBase>");
+      }
+      lines.push("      </Representation>");
+    }
+    lines.push("    </AdaptationSet>");
+  }
+
+  lines.push("  </Period>");
+  lines.push("</MPD>");
+  return lines.join("\n");
+}
+
+function getRuntimeContext(params = {}, context = {}) {
+  return context && Object.keys(context).length ? context : params?.context || {};
+}
+
+function buildDashProxyUrl(params = {}, context = {}, avid, cid) {
+  const ids = `${avid}_${cid}`;
+  const runtimeContext = getRuntimeContext(params, context);
+  const baseURL = String(runtimeContext?.baseURL || params?.baseURL || "").replace(/\/+$/, "");
+  const sourceId = String(runtimeContext?.sourceId || params?.sourceId || "");
+  const template = process.env.BILI_DASH_PROXY_URL || "";
+
+  if (template) {
+    return template
+      .replaceAll("{baseURL}", baseURL)
+      .replaceAll("{sourceId}", encodeURIComponent(sourceId))
+      .replaceAll("{ids}", encodeURIComponent(ids))
+      .replaceAll("{avid}", encodeURIComponent(avid))
+      .replaceAll("{cid}", encodeURIComponent(cid))
+      .replaceAll("{qn}", "127")
+      .replaceAll("{fnval}", "4048")
+      .replaceAll("{fourk}", "1");
+  }
+
+  return "";
+}
+
+function buildDashDataUrl(dash) {
+  const mpd = buildMpd(dash);
+  return `data:application/dash+xml;base64,${Buffer.from(mpd, "utf8").toString("base64")}`;
+}
 
 const CLASSES = [
   { type_id: "沙雕仙逆", type_name: "傻屌仙逆" },
@@ -264,14 +466,24 @@ async function category(params) {
   }
 
   try {
+    const rawParams = {
+      search_type: "video",
+      keyword,
+      page,
+    };
+    const signedParams = await signWbiParams(rawParams);
+    logInfo(`签名参数: ${JSON.stringify(signedParams)}`);
+    const searchHeaders = await initSearchHeaders();
+    logInfo(`搜索Cookie(含buvid): ${searchHeaders.Cookie?.substring(0, 120)}`);
     const { data } = await axios.get("https://api.bilibili.com/x/web-interface/search/type", {
-      headers: BILI_HEADERS,
-      params: {
-        search_type: "video",
-        keyword,
-        page,
-      },
+      headers: searchHeaders,
+      params: signedParams,
     });
+    logInfo(`搜索响应 code: ${data?.code}, message: ${data?.message}`);
+    logInfo(`搜索结果数量: ${(data?.data?.result || []).length}, numResults: ${data?.data?.numResults}`);
+    if (data?.code !== 0) {
+      logInfo(`搜索响应完整: ${JSON.stringify(data).substring(0, 500)}`);
+    }
 
     const list = (data?.data?.result || [])
       .filter((item) => item.type === "video")
@@ -343,7 +555,7 @@ async function detail(params) {
   }
 }
 
-async function play(params) {
+async function play(params, context = {}) {
   let playId = params.playId || "";
   const flag = params.flag || "";
 
@@ -374,6 +586,7 @@ async function play(params) {
   const avid = idParts[0];
   const cid = idParts[1];
   const loggedIn = isLoggedIn();
+  const dashProxyUrl = loggedIn ? buildDashProxyUrl(params, context, avid, cid) : "";
 
   const qualityList = loggedIn
     ? [127, 126, 125, 120, 116, 112, 80, 74, 64, 32, 16]
@@ -387,6 +600,18 @@ async function play(params) {
 
   const qualitySet = new Set();
   const availableQualities = [];
+  let dashProxyAdded = false;
+
+  if (dashProxyUrl) {
+    availableQualities.push({
+      name: "DASH(代理)",
+      url: dashProxyUrl,
+      qn: 1000,
+      isDashProxy: true,
+      audioUrl: "",
+    });
+    dashProxyAdded = true;
+  }
 
   for (const qn of qualityList) {
     const useDash = qn > 116;
@@ -411,6 +636,17 @@ async function play(params) {
       qualitySet.add(actualQn);
 
       if (payload.dash?.video?.length) {
+        if (loggedIn && !dashProxyAdded) {
+          availableQualities.push({
+            name: "DASH(代理)",
+            url: buildDashDataUrl(payload.dash),
+            qn: 1000,
+            isDashProxy: true,
+            audioUrl: "",
+          });
+          dashProxyAdded = true;
+        }
+
         const bestVideo = [...payload.dash.video].sort((a, b) => {
           if ((b.id || 0) !== (a.id || 0)) return (b.id || 0) - (a.id || 0);
           if ((b.bandwidth || 0) !== (a.bandwidth || 0)) return (b.bandwidth || 0) - (a.bandwidth || 0);
@@ -485,12 +721,50 @@ async function play(params) {
   return response;
 }
 
+async function proxy(params = {}) {
+  const ids = params.ids || params.playId || params.id || "";
+  const idParts = String(ids).split("_");
+  if (idParts.length < 2) return "";
+
+  const avid = idParts[0];
+  const cid = idParts[1];
+  const qn = parseInt(params.qn, 10) || 127;
+  const headers = {
+    ...BILI_HEADERS,
+    Referer: `https://www.bilibili.com/video/av${avid}`,
+    Origin: "https://www.bilibili.com",
+  };
+
+  try {
+    const { data } = await axios.get("https://api.bilibili.com/x/player/playurl", {
+      headers,
+      params: {
+        avid,
+        cid,
+        qn,
+        fnval: parseInt(params.fnval, 10) || 4048,
+        fourk: params.fourk == null ? 1 : params.fourk,
+        ...(!isLoggedIn() ? { try_look: 1 } : {}),
+      },
+    });
+
+    if (data?.code === 0 && data?.data?.dash) {
+      return buildMpd(data.data.dash);
+    }
+    return "";
+  } catch (error) {
+    logError("DASH代理获取失败", error);
+    return "";
+  }
+}
+
 module.exports = {
   home,
   category,
   search,
   detail,
   play,
+  proxy,
 };
 
 const runner = require("spider_runner");

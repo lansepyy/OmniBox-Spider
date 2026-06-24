@@ -24,6 +24,7 @@ BASE_URL = "https://www.rrdynb.com"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
 
 # FlareSolverr 服务地址。留空表示不启用，需通过环境变量显式配置。
+# 项目地址：https://github.com/FlareSolverr/FlareSolverr
 RRDYNB_FLARESOLVERR_URL = str(os.environ.get("RRDYNB_FLARESOLVERR_URL") or "").strip()
 # FlareSolverr 会话名。用于复用已过验证的浏览器会话。
 RRDYNB_FLARESOLVERR_SESSION = str(os.environ.get("RRDYNB_FLARESOLVERR_SESSION") or "rrdynb-search").strip()

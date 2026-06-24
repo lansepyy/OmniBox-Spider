@@ -2,7 +2,7 @@
 // @author 
 // @description 刮削：不支持，弹幕：不支持，嗅探：不支持
 // @dependencies: axios
-// @version 1.0.3
+// @version 1.0.4
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/教育/贝乐虎.js
 
 /**
@@ -59,6 +59,31 @@ const logError = (message, error) => {
 };
 
 // ========== 通用函数 ==========
+const normalizeText = (text) => String(text || "").trim().toLowerCase().replace(/\s+/g, "");
+
+const isKeywordMatched = (item, keyword) => {
+  const normalizedKeyword = normalizeText(keyword);
+  if (!normalizedKeyword) return false;
+
+  const title = normalizeText(item?.title);
+  return title.includes(normalizedKeyword);
+};
+
+const pickVideoItems = (data) => {
+  const items = data?.result?.items;
+  return Array.isArray(items) ? items : [];
+};
+
+const uniqueVideoItems = (items) => {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = `${item?.url || ""}@@${item?.title || ""}`;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
 const fetchVideos = async (subcateId, page = 1, keyword = "") => {
   try {
     const url = `${beilehuConfig.host}/api/v1/bv/video`;
@@ -142,7 +167,7 @@ const parsePlaySources = (fromStr, urlStr) => {
 async function home() {
   try {
     const data = await fetchVideos("56", 1);
-    const list = data?.result?.items ? formatVideoList(data.result.items) : [];
+    const list = formatVideoList(pickVideoItems(data));
     return {
       class: CLASS_DATA,
       list: list.slice(0, PAGE_LIMIT),
@@ -158,7 +183,7 @@ async function category(params) {
   const pg = parseInt(page) || 1;
   try {
     const data = await fetchVideos(categoryId, pg);
-    const list = data?.result?.items ? formatVideoList(data.result.items) : [];
+    const list = formatVideoList(pickVideoItems(data));
     const pagecount = data?.result?.total_page || (list.length >= PAGE_LIMIT ? pg + 1 : pg);
     return {
       list,
@@ -172,9 +197,34 @@ async function category(params) {
 }
 
 async function search(params) {
-  const keyword = params.keyword || params.wd || "";
-  OmniBox.log("info", `[贝乐虎] 搜索功能未实现，关键词: ${keyword}`);
-  return { list: [], page: 1, pagecount: 1 };
+  const keyword = String(params.keyword || params.wd || "").trim();
+  const pg = Math.max(1, parseInt(params.page, 10) || 1);
+
+  if (!keyword) {
+    return { list: [], page: pg, pagecount: 1, total: 0 };
+  }
+
+  try {
+    const responses = await Promise.all(
+      CLASS_DATA.map((item) => fetchVideos(item.type_id, pg, keyword))
+    );
+    const matchedItems = uniqueVideoItems(
+      responses
+        .flatMap(pickVideoItems)
+        .filter((item) => isKeywordMatched(item, keyword))
+    );
+    const list = formatVideoList(matchedItems).slice(0, PAGE_LIMIT);
+
+    return {
+      list,
+      page: pg,
+      pagecount: list.length >= PAGE_LIMIT ? pg + 1 : pg,
+      total: matchedItems.length,
+    };
+  } catch (error) {
+    logError("搜索错误", error);
+    return { list: [], page: pg, pagecount: 1, total: 0 };
+  }
 }
 
 async function detail(params) {

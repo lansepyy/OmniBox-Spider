@@ -2,15 +2,29 @@
 // @author 梦
 // @description 影视站：Gimy / gimy.now / gimyai.tw，支持首页、分类、详情、搜索与播放页嗅探
 // @dependencies cheerio,@types/opencc-js
-// @version 1.2.1
+// @version 1.2.5
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/Gimy剧迷.js
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");
 const cheerio = require("cheerio");
 
+// ==================== 配置开始 ====================
+// 是否禁用 OpenCC 等外部繁简转换库；环境变量 GIMY_DISABLE_OPENCC=1 时仅使用内置兜底映射。
+const DISABLE_OPENCC = String(process.env.GIMY_DISABLE_OPENCC || "").trim() === "1";
+
+// 播放线路排序环境配置；优先读取 GIMY_PLAY_SOURCE_ORDER，GIMY_SOURCE_ORDER 作为兼容别名。
+const PLAY_SOURCE_ORDER_CONFIG = String(process.env.GIMY_PLAY_SOURCE_ORDER || process.env.GIMY_SOURCE_ORDER || "").trim();
+
+// 站点基础地址，用于补全相对链接和发起默认请求。
 const BASE_URL = "https://gimyai.tw";
+
+// 请求使用的 User-Agent，避免站点返回移动端或拦截页面。
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+
+// 未设置播放线路排序环境变量时的默认优先线路，未命中的线路保持站点原始顺序。
+const DEFAULT_PLAY_SOURCE_ORDER = ["4K画质线路 ᴴᴰ", "超清线路 ᴴᴰ"];
+// ==================== 配置结束 ====================
 
 let simplifyConverter = null;
 let simplifyConverterName = "fallback-map";
@@ -130,7 +144,7 @@ function getSimplifyConverter() {
   if (simplifyConverterChecked) return simplifyConverter;
   simplifyConverterChecked = true;
 
-  if (String(process.env.GIMY_DISABLE_OPENCC || "").trim() === "1") {
+  if (DISABLE_OPENCC) {
     simplifyConverterName = "fallback-map";
     simplifyConverter = fallbackTraditionalToSimplified;
     return simplifyConverter;
@@ -210,6 +224,55 @@ function convertTraditionalToSimplified(value) {
 
 function toDisplayText(value) {
   return convertTraditionalToSimplified(normalizeText(value));
+}
+
+function parsePlaySourceOrderConfig() {
+  const raw = PLAY_SOURCE_ORDER_CONFIG;
+  if (!raw) return DEFAULT_PLAY_SOURCE_ORDER;
+
+  if (raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.map((item) => String(item || "").trim()).filter(Boolean);
+    } catch (_) {}
+  }
+
+  return raw.split(/[,\n|;]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function normalizePlaySourceKey(value) {
+  return toDisplayText(value)
+    .replace(/[ᴴＨｈ]/g, "H")
+    .replace(/[ᴰＤｄ]/g, "D")
+    .replace(/\s+/g, "")
+    .replace(/HD$/i, "")
+    .toLowerCase();
+}
+
+function getPlaySourceOrderMap() {
+  const orderMap = new Map();
+  parsePlaySourceOrderConfig().forEach((name, index) => {
+    const key = normalizePlaySourceKey(name);
+    if (key && !orderMap.has(key)) orderMap.set(key, index);
+  });
+  return orderMap;
+}
+
+function sortPlaySources(playSources) {
+  const orderMap = getPlaySourceOrderMap();
+  if (!orderMap.size) return playSources;
+
+  return playSources
+    .map((source, index) => ({ source, index, order: orderMap.get(normalizePlaySourceKey(source.name)) }))
+    .sort((a, b) => {
+      const aConfigured = Number.isInteger(a.order);
+      const bConfigured = Number.isInteger(b.order);
+      if (aConfigured && bConfigured) return a.order - b.order || a.index - b.index;
+      if (aConfigured) return -1;
+      if (bConfigured) return 1;
+      return a.index - b.index;
+    })
+    .map((item) => item.source);
 }
 
 function normalizeSearchKeyword(value) {
@@ -364,29 +427,45 @@ async function category(params, context) {
   }
 }
 
+function collectPlaylistEpisodes($, scope) {
+  const episodes = [];
+  const seen = new Set();
+  $(scope).find("a[href*='/play/']").each((_, a) => {
+    const $a = $(a);
+    const href = $a.attr("href") || "";
+    const playId = absUrl(href);
+    if (!playId || seen.has(playId)) return;
+    const epName = toDisplayText($a.text()) || "正片";
+    seen.add(playId);
+    episodes.push({ name: epName, playId });
+  });
+  return episodes;
+}
+
 function parsePlaySources($) {
   const tabs = [];
+  const seenTabs = new Set();
   $("#playTab a[href^='#con_playlist_']").each((_, el) => {
     const $el = $(el);
     const href = $el.attr("href") || "";
     const tabId = href.replace(/^#/, "");
     const name = toDisplayText($el.text()) || tabId;
-    if (tabId) tabs.push({ tabId, name });
+    if (tabId && !seenTabs.has(tabId)) {
+      seenTabs.add(tabId);
+      tabs.push({ tabId, name });
+    }
   });
 
   const playSources = [];
   for (const tab of tabs) {
-    const episodes = [];
-    $(`#${tab.tabId} a[href*='/play/']`).each((_, a) => {
-      const $a = $(a);
-      const href = $a.attr("href") || "";
-      const epName = toDisplayText($a.text()) || "正片";
-      if (!href) return;
-      episodes.push({ name: epName, playId: absUrl(href) });
+    let episodes = [];
+    $("[id]").filter((_, el) => String($(el).attr("id") || "") === tab.tabId).each((_, playlist) => {
+      const candidate = collectPlaylistEpisodes($, playlist);
+      if (candidate.length > episodes.length) episodes = candidate;
     });
     if (episodes.length) playSources.push({ name: tab.name, episodes });
   }
-  return playSources;
+  return sortPlaySources(playSources);
 }
 
 function pickInfo(html, label) {

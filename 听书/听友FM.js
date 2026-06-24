@@ -1,6 +1,6 @@
 // @name 听友FM
 // @author OmniBox助手
-// @version 1.0.3
+// @version 1.0.5
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/听书/听友FM.js
 // @dependencies axios,cheerio,@noble/ciphers
 // notes:
@@ -56,6 +56,7 @@ async function getXChaChaModule() {
 const SITE = "https://tingyou.fm";
 const PAYLOAD_KEY_HEX = "ea9d9d4f9a983fe6f6382f29c7b46b8d6dc47abc6da36662e6ddff8c78902f65";
 const PAYLOAD_VERSION = 1;
+const DETAIL_GROUP_SIZE = Math.max(1, Number(process.env.TINGYOU_DETAIL_GROUP_SIZE || 40) || 40);
 
 const CATEGORY_MAP = [
   { type_id: "46", type_name: "有声小说" },
@@ -470,6 +471,50 @@ function parseNuxtCategoryData(html, categoryId) {
   return root?.data?.[dataKey] || null;
 }
 
+function parseNuxtAlbumData(html, albumId) {
+  const match = html.match(/<script[^>]*id=["']__NUXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
+  if (!match) return null;
+  try {
+    const payload = JSON.parse(match[1]);
+    const root = decodeNuxtValue(payload, 1);
+    const data = root?.data || {};
+    return {
+      detail: data[`album-detail-${albumId}`] || null,
+      chapters: data[`album-chapters-${albumId}`] || null
+    };
+  } catch (e) {
+    log("error", `album.nuxt.parse.error albumId=${albumId} message=${e.message}`);
+    return null;
+  }
+}
+
+function mapNuxtChapterToEpisode(chapter, albumId, fallbackIndex = 0) {
+  const chapterIdx = Number(chapter?.index || chapter?.idx || chapter?.chapter_idx || fallbackIndex + 1);
+  if (!Number.isFinite(chapterIdx) || chapterIdx <= 0) return null;
+  const title = String(chapter?.title || chapter?.name || `第${chapterIdx}集`).trim();
+  return {
+    name: title || `第${chapterIdx}集`,
+    playId: `${albumId}|${chapterIdx}`
+  };
+}
+
+function buildGroupedPlaySources(episodes, groupSize = DETAIL_GROUP_SIZE) {
+  const list = Array.isArray(episodes) ? episodes : [];
+  if (!list.length) return [];
+  const size = Math.max(1, Number(groupSize) || 40);
+  const sources = [];
+  for (let i = 0; i < list.length; i += size) {
+    const chunk = list.slice(i, i + size);
+    const start = i + 1;
+    const end = i + chunk.length;
+    sources.push({
+      name: `${start}-${end}集`,
+      episodes: chunk
+    });
+  }
+  return sources;
+}
+
 function mapNuxtAlbumItem(item, categoryId, categoryName) {
   if (!item || !item.id) return null;
   const statusText = String(item.status) === "1" ? "连载中" : String(item.status) === "0" ? "已完结" : "";
@@ -620,39 +665,64 @@ async function detail(params, context) {
     log("info", `detail.html length=${html.length}`);
     const $ = cheerio.load(html);
     const $panel = $("section.album-pannel");
+    const nuxtAlbum = parseNuxtAlbumData(html, videoId);
+    const nuxtDetail = nuxtAlbum?.detail || {};
+    const nuxtChapters = Array.isArray(nuxtAlbum?.chapters?.chapters) ? nuxtAlbum.chapters.chapters : [];
+    if (nuxtAlbum) {
+      log("info", `detail.nuxt found=true chapterCount=${nuxtChapters.length} total=${nuxtAlbum?.chapters?.count || nuxtDetail?.count || 0}`);
+    } else {
+      log("warn", `detail.nuxt found=false fallback=dom`);
+    }
 
     const vod_name =
+      nuxtDetail.title ||
       safeText($panel.find(".album-intro h1").first()) ||
       safeText($panel.find("h1").first()) ||
       $("meta[property='og:title']").attr("content") ||
       `专辑${videoId}`;
 
     const vod_pic =
+      normalizeUrl(nuxtDetail.cover_url || nuxtDetail.cover || "") ||
       pickImage($panel.find("img").first()) ||
       normalizeUrl($("meta[property='og:image']").attr("content") || "");
 
     const vod_content =
+      nuxtDetail.synopsis ||
+      nuxtDetail.description ||
+      nuxtDetail.intro ||
       $("meta[name='description']").attr("content") ||
       $("meta[property='og:description']").attr("content") ||
       safeText($(".album-desc, .desc, .intro").first()) ||
       "";
 
     let type_name = "";
+    if (typeof nuxtDetail.type === "string") type_name = nuxtDetail.type;
+    else if (typeof nuxtDetail.cat === "string") type_name = nuxtDetail.cat;
+    else if (nuxtDetail.cat?.name) type_name = String(nuxtDetail.cat.name);
+    else if (nuxtDetail.type?.name) type_name = String(nuxtDetail.type.name);
     $panel.find(".pods span").each((_, el) => {
       const txt = safeText($(el));
-      if (txt.startsWith("分类:")) type_name = txt.replace(/^分类:\s*/, "").trim();
+      if (!type_name && txt.startsWith("分类:")) type_name = txt.replace(/^分类:\s*/, "").trim();
     });
 
     const episodes = [];
-    $("ul.chapter-list > li.chapter-item").each((idx, el) => {
-      const $item = $(el);
-      const numText = safeText($item.find("p").first());
-      const title = safeText($item.find(".item-content .title").first()) || safeText($item.find(".title").first()) || `第${idx + 1}集`;
-      const chapterIdx = Number(numText) || idx + 1;
-      episodes.push({ name: title, playId: `${videoId}|${chapterIdx}` });
-    });
+    if (nuxtChapters.length) {
+      nuxtChapters.forEach((chapter, idx) => {
+        const episode = mapNuxtChapterToEpisode(chapter, videoId, idx);
+        if (episode) episodes.push(episode);
+      });
+    } else {
+      $("ul.chapter-list > li.chapter-item").each((idx, el) => {
+        const $item = $(el);
+        const numText = safeText($item.find("p").first());
+        const title = safeText($item.find(".item-content .title").first()) || safeText($item.find(".title").first()) || `第${idx + 1}集`;
+        const chapterIdx = Number(numText) || idx + 1;
+        episodes.push({ name: title, playId: `${videoId}|${chapterIdx}` });
+      });
+    }
 
     const finalEpisodes = uniqBy(episodes, item => item.playId);
+    const playSources = buildGroupedPlaySources(finalEpisodes);
     const out = {
       list: [{
         vod_id: String(videoId),
@@ -661,10 +731,10 @@ async function detail(params, context) {
         vod_content,
         type_id: "",
         type_name,
-        vod_play_sources: [{ name: "TingYou", episodes: finalEpisodes }]
+        vod_play_sources: playSources.length ? playSources : [{ name: "TingYou", episodes: finalEpisodes }]
       }]
     };
-    log("info", `detail.out listCount=${out.list.length} episodeCount=${finalEpisodes.length} vod=${j({ vod_id: String(videoId), vod_name, type_name, vod_pic })}`);
+    log("info", `detail.out listCount=${out.list.length} episodeCount=${finalEpisodes.length} sourceCount=${out.list[0].vod_play_sources.length} groupSize=${DETAIL_GROUP_SIZE} vod=${j({ vod_id: String(videoId), vod_name, type_name, vod_pic })}`);
     return out;
   } catch (e) {
     log("error", `detail.error message=${e.message} stack=${e.stack || ""}`);

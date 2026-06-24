@@ -2,7 +2,7 @@
 // @author tcxp
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, crypto
-// @version 1.0.1
+// @version 1.1.0
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/布布影视.js
 
 /**
@@ -30,17 +30,266 @@ const path = require("path");
 const OmniBox = require("omnibox_sdk");
 
 // ========== 全局配置 ==========
-const config = {
-    host: 'https://bubuyingshi.com',
-    headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
-        'Accept': 'application/json',
-        'X-Client': '8f3d2a1c7b6e5d4c9a0b1f2e3d4c5b6a',
-        'web-sign': 'f65f3a83d6d9ad6f',
-        'accept-language': 'zh-CN,zh;q=0.9',
-        'referer': 'https://bubuyingshi.com'
-    }
+const BUBU_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36';
+const BUBU_API_HEADERS = {
+    'User-Agent': BUBU_UA,
+    'Accept': 'application/json',
+    'X-Client': '8f3d2a1c7b6e5d4c9a0b1f2e3d4c5b6a',
+    'web-sign': 'f65f3a83d6d9ad6f',
+    'accept-language': 'zh-CN,zh;q=0.9',
 };
+const config = { headers: BUBU_API_HEADERS };
+
+// ========== 动态域名配置 ==========
+const BUBU_RELEASE_URL = "https://bubuzhuiju.com";
+const HOST_CANDIDATES = [];
+const HOST_CACHE_KEY = "bubu:active_host";
+const HOST_CACHE_TTL = 60 * 60 * 24 * 30;
+let ACTIVE_HOST = "";
+
+function normalizeHost(url = "") {
+    const value = String(url || "").trim();
+    if (!value) return "";
+    const withProtocol = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+    try {
+        const target = new URL(withProtocol);
+        return `${target.protocol}//${target.host}`;
+    } catch {
+        return withProtocol.replace(/\/+$/, "");
+    }
+}
+
+function getCurrentHost() {
+    return ACTIVE_HOST || HOST_CANDIDATES[0] || "";
+}
+
+async function saveActiveHostCache(host) {
+    const normalized = normalizeHost(host);
+    if (!normalized) return;
+    try {
+        await OmniBox.setCache(HOST_CACHE_KEY, normalized, HOST_CACHE_TTL);
+        logInfo("写入域名缓存", { host: normalized });
+    } catch (error) {
+        logInfo("写入域名缓存失败", { host: normalized, error: error.message });
+    }
+}
+
+async function readActiveHostCache() {
+    try {
+        const cached = await OmniBox.getCache(HOST_CACHE_KEY);
+        const normalized = normalizeHost(cached || "");
+        if (normalized) {
+            logInfo("命中域名缓存", { host: normalized });
+            return normalized;
+        }
+    } catch (error) {
+        logInfo("读取域名缓存失败", { error: error.message });
+    }
+    return "";
+}
+
+async function requestTextAbsolute(url, options = {}) {
+    const maxRedirects = options.maxRedirects || 3;
+    let currentUrl = url;
+    for (let i = 0; i <= maxRedirects; i++) {
+        const target = new (require("url").URL)(currentUrl);
+        const lib = target.protocol === "https:" ? https : http;
+        const headers = {
+            "User-Agent": BUBU_UA,
+            "Referer": `${options.hostForHeaders || getCurrentHost()}/`,
+            "Origin": options.hostForHeaders || getCurrentHost(),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            ...(options.headers || {}),
+        };
+        const body = await new Promise((resolve, reject) => {
+            const reqOpts = {
+                method: options.method || "GET",
+                headers,
+                timeout: options.timeout || 15000,
+            };
+            if (target.protocol === "https:") {
+                reqOpts.rejectUnauthorized = false;
+            }
+            const req = lib.request(target, reqOpts, (res) => {
+                const chunks = [];
+                res.on("data", (chunk) => chunks.push(chunk));
+                res.on("end", () => {
+                    const b = Buffer.concat(chunks).toString("utf8");
+                    const statusCode = Number(res.statusCode || 0);
+                    if (statusCode >= 300 && statusCode < 400 && res.headers.location) {
+                        resolve({ redirect: res.headers.location, body: b, status: statusCode });
+                    } else if (statusCode < 200 || statusCode >= 400) {
+                        reject(new Error(`请求失败: ${statusCode} ${target.href}`));
+                    } else {
+                        resolve({ redirect: null, body: b, status: statusCode });
+                    }
+                });
+            });
+            req.on("error", reject);
+            req.on("timeout", () => {
+                req.destroy(new Error(`请求超时: ${target.href}`));
+            });
+            req.end();
+        });
+        if (body.redirect) {
+            const nextUrl = body.redirect.startsWith("http") ? body.redirect : new (require("url").URL)(body.redirect, currentUrl).href;
+            currentUrl = nextUrl;
+            if (i === maxRedirects) {
+                return body.body;
+            }
+            continue;
+        }
+        return body.body;
+    }
+    return "";
+}
+
+async function fetchReleaseHosts() {
+    const found = [];
+    const releaseHost = normalizeHost(BUBU_RELEASE_URL);
+    const pushHost = (value) => {
+        const normalized = normalizeHost(value);
+        if (!normalized) return;
+        if (normalized === releaseHost) return;
+        const hostPart = new (require("url").URL)(normalized).host;
+        if (/bubuyingshi\.(app|com)$/i.test(hostPart)) return;
+        if (/bubuzhuiju\.com$/i.test(hostPart)) return;
+        if (/www\.w3\.org$/i.test(hostPart)) return;
+        found.push(normalized);
+    };
+
+    let pageUrl = BUBU_RELEASE_URL;
+    let html = "";
+    try {
+        html = await requestTextAbsolute(pageUrl, {
+            timeout: 12000,
+            hostForHeaders: normalizeHost(pageUrl),
+        });
+    } catch (e) {
+        logInfo("发布页 HTTPS 失败，尝试 HTTP", { error: e.message });
+        try {
+            const httpUrl = pageUrl.replace(/^https:/, "http:");
+            html = await requestTextAbsolute(httpUrl, {
+                timeout: 12000,
+                hostForHeaders: normalizeHost(pageUrl),
+            });
+        } catch (e2) {
+            logInfo("发布页 HTTP 也失败", { error: e2.message });
+            return [];
+        }
+    }
+
+    const redirectMatch = String(html).match(/location\s*=\s*['"]?(https?:\/\/[^'"\s>]+)/i);
+    if (redirectMatch) {
+        pageUrl = redirectMatch[1];
+        try {
+            html = await requestTextAbsolute(pageUrl, {
+                timeout: 12000,
+                hostForHeaders: normalizeHost(pageUrl),
+            });
+        } catch (e) {
+            logInfo("发布页重定向目标获取失败", { url: pageUrl, error: e.message });
+        }
+    }
+
+    const scriptSrcs = [...String(html).matchAll(/<script[^>]*src=["']([^"']+)["']/gi)].map(m => m[1]);
+    const configSrc = scriptSrcs.find(s => /config/i.test(s));
+    if (configSrc) {
+        const configUrl = configSrc.startsWith("http") ? configSrc : `${normalizeHost(pageUrl)}/${configSrc.startsWith("/") ? configSrc.substring(1) : configSrc}`;
+        try {
+            const configText = await requestTextAbsolute(configUrl, {
+                timeout: 8000,
+                hostForHeaders: normalizeHost(pageUrl),
+            });
+            const hostRegex = /host\s*:\s*['"]([^'"]+)['"]/gi;
+            let hm;
+            while ((hm = hostRegex.exec(configText))) {
+                pushHost(hm[1]);
+            }
+        } catch (e) {
+            logInfo("发布页config.js获取失败", { url: configUrl, error: e.message });
+        }
+    }
+
+    const domainRegex = /https?:\/\/[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?::\d+)?/g;
+    const hrefRegex = /href=["']([^"']+)["']/g;
+    let m;
+    while ((m = domainRegex.exec(html))) pushHost(m[0]);
+    while ((m = hrefRegex.exec(html))) {
+        const href = String(m[1] || "").trim();
+        if (/^https?:\/\//i.test(href)) pushHost(href);
+    }
+
+    const unique = found.filter((item, idx, arr) => arr.indexOf(item) === idx);
+    logInfo("发布页候选域名", { count: unique.length, hosts: unique.slice(0, 12) });
+    return unique;
+}
+
+async function probeHost(host) {
+    try {
+        const text = await requestTextAbsolute(`${host}/api.php/web/index/home`, {
+            timeout: 8000,
+            headers: config.headers,
+            hostForHeaders: host,
+        });
+        try {
+            const json = JSON.parse(text);
+            if (json && json.data) return true;
+        } catch {}
+        logInfo("域名探测返回非JSON", { host });
+        return false;
+    } catch (error) {
+        logInfo("域名探测失败", { host, error: error.message });
+        return false;
+    }
+}
+
+async function ensureActiveHost(preferredHost = "") {
+    const preferred = normalizeHost(preferredHost);
+
+    // 1. 优先探测 preferred 和缓存域名，不拉发布页
+    const cachedHost = await readActiveHostCache();
+    const quickList = [preferred, cachedHost, getCurrentHost()]
+        .filter(Boolean)
+        .filter((item, idx, arr) => arr.indexOf(item) === idx);
+
+    for (const host of quickList) {
+        if (await probeHost(host)) {
+            if (ACTIVE_HOST !== host) {
+                logInfo("缓存域名可用", { from: ACTIVE_HOST, to: host });
+            }
+            ACTIVE_HOST = host;
+            await saveActiveHostCache(host);
+            return ACTIVE_HOST;
+        }
+    }
+
+    // 2. 缓存域名都不可用，才去发布页拉取新域名
+    logInfo("缓存域名均不可用，开始从发布页获取", { tried: quickList });
+    let releaseHosts = [];
+    try {
+        releaseHosts = await fetchReleaseHosts();
+    } catch (error) {
+        logInfo("读取发布页域名失败", { error: error.message });
+    }
+
+    const ordered = [
+        ...releaseHosts,
+        ...HOST_CANDIDATES,
+    ].filter(Boolean).filter((item, idx, arr) => arr.indexOf(item) === idx);
+
+    for (const host of ordered) {
+        if (await probeHost(host)) {
+            logInfo("发布页域名可用", { to: host });
+            ACTIVE_HOST = host;
+            await saveActiveHostCache(host);
+            return ACTIVE_HOST;
+        }
+    }
+    throw new Error(`未找到可用域名: ${[...quickList, ...ordered].join(", ")}`);
+}
+
+// ========== 全局配置（已移至顶部） ==========
 
 // 弹幕 API 地址(优先使用环境变量)
 const DANMU_API = process.env.DANMU_API || "";
@@ -54,9 +303,9 @@ const _http = axios.create({
 
 // 播放请求头
 const PLAY_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
-    "Referer": "https://bubuyingshi.com/",
-    "Origin": "https://bubuyingshi.com"
+    "User-Agent": BUBU_UA,
+    "Referer": `${getCurrentHost()}/`,
+    "Origin": getCurrentHost()
 };
 
 const isHttpUrl = (u) => u && (u.startsWith('http://') || u.startsWith('https://'));
@@ -475,7 +724,6 @@ async function initWasm() {
 
     wasmInitPromise = (async () => {
         try {
-            // 尝试多个可能的 WASM 文件路径
             const possiblePaths = [
                 path.join(__dirname, 'bubuyingshi.wasm'),
                 '/www/wwwroot/vodspider/vod/routes/bubuyingshi.wasm',
@@ -484,7 +732,6 @@ async function initWasm() {
 
             let wasmBuf = null;
 
-            // 尝试从本地加载
             for (const p of possiblePaths) {
                 try {
                     wasmBuf = fs.readFileSync(p);
@@ -493,16 +740,25 @@ async function initWasm() {
                 } catch (e) { }
             }
 
-            // 如果本地没有，从远程下载
             if (!wasmBuf) {
                 logInfo('本地未找到 WASM 文件，开始从远程下载...');
+                await ensureActiveHost();
+                const wasmUrl = `${getCurrentHost()}/assets/web_app_wasm_bg-DaFtKBCq.wasm`;
                 wasmBuf = await new Promise((resolve, reject) => {
-                    https.get('https://bubuyingshi.com/assets/web_app_wasm_bg-DaFtKBCq.wasm', (res) => {
+                    const target = new URL(wasmUrl);
+                    const req = https.get({
+                        hostname: target.hostname,
+                        path: target.pathname,
+                        headers: {
+                            'User-Agent': BUBU_UA,
+                            'Referer': `${getCurrentHost()}/`,
+                        },
+                        rejectUnauthorized: false,
+                    }, (res) => {
                         const chunks = [];
                         res.on('data', c => chunks.push(c));
                         res.on('end', () => {
                             const buf = Buffer.concat(chunks);
-                            // 保存到本地缓存
                             try {
                                 fs.writeFileSync(path.join(__dirname, 'bubuyingshi.wasm'), buf);
                                 logInfo('WASM 文件已缓存到本地');
@@ -511,16 +767,16 @@ async function initWasm() {
                             }
                             resolve(buf);
                         });
-                    }).on('error', reject);
+                    });
+                    req.on('error', reject);
+                    req.setTimeout(15000, () => { req.destroy(); reject(new Error('WASM下载超时')); });
                 });
             }
 
-            // 实例化 WASM 模块
             const { instance } = await WebAssembly.instantiate(wasmBuf, wasmBuildImports());
             wasmModule = instance;
             wasmMemView = null;
 
-            // 启动 WASM 模块
             if (wasmModule.exports.__wbindgen_start) {
                 wasmModule.exports.__wbindgen_start();
             }
@@ -629,13 +885,14 @@ async function postProtobuf(url, data, extraHeaders = {}) {
             hostname: u.hostname,
             path: u.pathname,
             method: 'POST',
+            rejectUnauthorized: false,
             headers: {
                 'Content-Type': 'application/x-protobuf',
                 'Accept': 'application/x-protobuf',
                 'Content-Length': data.length,
-                'User-Agent': config.headers['User-Agent'],
-                'Referer': 'https://bubuyingshi.com',
-                'Origin': 'https://bubuyingshi.com',
+                'User-Agent': BUBU_UA,
+                'Referer': `${getCurrentHost()}/`,
+                'Origin': getCurrentHost(),
                 ...extraHeaders
             }
         }, (res) => {
@@ -655,8 +912,21 @@ async function postProtobuf(url, data, extraHeaders = {}) {
  * @param {string} url - 请求 URL
  * @returns {Promise} axios 响应对象
  */
-async function apiGet(url) {
-    return _http.get(url, { headers: config.headers });
+async function apiGet(apiPath) {
+    await ensureActiveHost();
+    const host = getCurrentHost();
+    const fullPath = apiPath.startsWith('http') ? apiPath.replace(/^https?:\/\/[^/]+/, host) : `${host}${apiPath.startsWith('/') ? apiPath : '/' + apiPath}`;
+    const headers = {
+        ...config.headers,
+        'referer': `${host}/`
+    };
+    const res = await _http.get(fullPath, { headers });
+    if (typeof res.data === 'string') {
+        try {
+            res.data = JSON.parse(res.data);
+        } catch {}
+    }
+    return res;
 }
 
 /**
@@ -666,7 +936,7 @@ async function apiGet(url) {
  * @returns {Promise<string|null>} 解密后的真实播放地址
  */
 async function decodeEncryptedUrl(rawUrl, vodFrom) {
-    // 确保 WASM 模块已初始化
+    await ensureActiveHost();
     if (!wasmReady) {
         const ok = await initWasm();
         if (!ok) {
@@ -684,7 +954,7 @@ async function decodeEncryptedUrl(rawUrl, vodFrom) {
 
         // 3. 发送 Protobuf 请求
         const resp = await postProtobuf(
-            `${config.host}/api.php/web/decode/url`,
+            `${getCurrentHost()}/api.php/web/decode/url`,
             reqData,
             sigHeaders
         );
@@ -1075,7 +1345,7 @@ async function home(params) {
 
     try {
         // 请求首页获取分类数据
-        const res = await apiGet(`${config.host}/api.php/web/index/home`);
+        const res = await apiGet('/api.php/web/index/home');
         const list = [];
         // 提取分类列表
         const categories = res.data.data.categories || [];
@@ -1128,7 +1398,7 @@ async function category(params) {
         const PAGE_SIZE = 50;
 
         // 构建请求 URL
-        let url = `${config.host}/api.php/web/filter/vod?type_name=${encodeURIComponent(categoryId)}&page=${pg}&limit=${PAGE_SIZE}`;
+        let url = `/api.php/web/filter/vod?type_name=${encodeURIComponent(categoryId)}&page=${pg}&limit=${PAGE_SIZE}`;
 
         // 添加筛选参数
         const extend = filters || {};
@@ -1186,7 +1456,7 @@ async function detail(params) {
 
     try {
         // 请求详情数据
-        const res = await apiGet(`${config.host}/api.php/web/vod/get_detail?vod_id=${videoId}`);
+        const res = await apiGet(`/api.php/web/vod/get_detail?vod_id=${videoId}`);
         const data = res.data.data[0];
         const vodplayer = res.data.vodplayer;
 
@@ -1437,7 +1707,7 @@ async function search(params) {
     logInfo(`搜索关键词: ${wd}, 页码: ${pg}`);
 
     try {
-        const res = await apiGet(`${config.host}/api.php/web/search/index?wd=${encodeURIComponent(wd)}&page=${pg}&limit=50`);
+        const res = await apiGet(`/api.php/web/search/index?wd=${encodeURIComponent(wd)}&page=${pg}&limit=50`);
         const items = res.data.data || [];
         const hasMore = items.length >= 50;
 

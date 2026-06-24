@@ -2,7 +2,7 @@
 // @author 梦
 // @description 聚盘搜索分组版：搜索先按网盘分组，再进入二级结果；详情与播放沿用聚盘搜索的多层级展开、刮削、弹幕、观看记录能力
 // @dependencies: axios
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/聚盘搜索分组.js
 
 
@@ -11,8 +11,8 @@ const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");
 
 // ==================== 配置区域开始 ====================
-// 站点基地址
-const BASE = "https://pan.dyuzi.com";
+// 站点基地址（旧域 pan.dyuzi.com 已迁移/跳转到 ppan.dyuzi.com）
+const BASE = "https://ppan.dyuzi.com";
 // 站点前端 API 根地址
 const API = `${BASE}/api/frontend`;
 // 默认请求 User-Agent

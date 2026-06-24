@@ -1,6 +1,6 @@
 // @name 88看球
 // @dependencies: axios, cheerio, crypto-js
-// @version 1.0.1
+// @version 1.1.0
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/88看球.js
 /**
  * 刮削：不支持
@@ -12,6 +12,9 @@
  * 2. 接口包含：`home` / `category` / `search` / `detail` / `play`。
  * 3. 详情接口将旧式 `vod_play_from + vod_play_url` 转换为 `vod_play_sources`。
  * 4. `playId` 使用 Base64(JSON) 透传，播放阶段解码后按原逻辑返回 `parse=1`。
+ *
+ * 变更记录：
+ * - v1.1.0：网站改版，分类由4大类改为24子类，移除无效筛选；play-url API 改为 /source
  *
  * 环境变量：
  * - `KANQIU_HOST`：88看球域名，默认 `http://www.88kanqiu.cc`
@@ -71,39 +74,56 @@ function d64(encodedText) {
 /**
  * 兼容多种 id 格式，提取真实详情 URL 与展示名称
  * 支持：
- * 1) 新格式：Base64(JSON.stringify({ vid, name }))
- * 2) 旧格式：`${vid}###${encodeURIComponent(name)}`
- * 3) 兜底：直接把入参当 URL
+ * 1) 新格式：Base64(JSON.stringify({ gameId, playUrl, name }))
+ * 2) 旧格式：Base64(JSON.stringify({ vid, name }))
+ * 3) 旧格式：`${vid}###${encodeURIComponent(name)}`
+ * 4) 兜底：直接把入参当 URL
  */
 function parseVodId(rawId) {
   const idText = String(rawId || "");
   let realId = idText;
   let displayName = "赛事直播";
+  let gameId = "";
+  let playUrl = "";
 
-  // 新格式：Base64(JSON)
   const jsonText = d64(idText);
   if (jsonText && (jsonText.startsWith("{") || jsonText.startsWith("["))) {
     try {
       const parsed = JSON.parse(jsonText);
+      if (parsed?.gameId || parsed?.playUrl) {
+        realId = String(parsed.playUrl || parsed.vid || "");
+        displayName = String(parsed.name || displayName);
+        gameId = String(parsed.gameId || "");
+        playUrl = String(parsed.playUrl || "");
+        return { realId, displayName, gameId, playUrl };
+      }
       if (parsed?.vid) {
         realId = String(parsed.vid);
         displayName = String(parsed.name || displayName);
-        return { realId, displayName };
+        const match = realId.match(/\/live\/(\d+)\//);
+        if (match) gameId = match[1];
+        playUrl = realId;
+        return { realId, displayName, gameId, playUrl };
       }
     } catch {
       // 忽略，继续尝试旧格式
     }
   }
 
-  // 旧格式：vid###name
   if (idText.includes("###")) {
     const parts = idText.split("###", 2);
     realId = parts[0] || "";
     displayName = decodeURIComponent(parts[1] || "赛事直播");
-    return { realId, displayName };
+    const match = realId.match(/\/live\/(\d+)\//);
+    if (match) gameId = match[1];
+    playUrl = realId;
+    return { realId, displayName, gameId, playUrl };
   }
 
-  return { realId, displayName };
+  const m = idText.match(/\/live\/(\d+)\//);
+  if (m) gameId = m[1];
+  playUrl = idText;
+  return { realId, displayName, gameId, playUrl };
 }
 
 /**
@@ -155,50 +175,34 @@ function parseLinksFromPlayApiResponse(responseData) {
 function getClasses() {
   return [
     { type_id: "", type_name: "全部直播" },
-    { type_id: "1", type_name: "篮球直播" },
-    { type_id: "8", type_name: "足球直播" },
-    { type_id: "21", type_name: "其他直播" },
+    { type_id: "1", type_name: "NBA" },
+    { type_id: "2", type_name: "CBA" },
+    { type_id: "20", type_name: "WNBA" },
+    { type_id: "4", type_name: "篮球综合" },
+    { type_id: "3", type_name: "世界杯" },
+    { type_id: "8", type_name: "英超" },
+    { type_id: "9", type_name: "西甲" },
+    { type_id: "10", type_name: "意甲" },
+    { type_id: "14", type_name: "德甲" },
+    { type_id: "15", type_name: "法甲" },
+    { type_id: "12", type_name: "欧冠" },
+    { type_id: "13", type_name: "欧联" },
+    { type_id: "7", type_name: "中超" },
+    { type_id: "11", type_name: "亚冠" },
+    { type_id: "27", type_name: "足总杯" },
+    { type_id: "26", type_name: "美职联" },
+    { type_id: "31", type_name: "中甲" },
+    { type_id: "23", type_name: "足球综合" },
+    { type_id: "21", type_name: "体育电视台" },
+    { type_id: "29", type_name: "网球" },
+    { type_id: "25", type_name: "NFL" },
+    { type_id: "19", type_name: "羽毛球" },
+    { type_id: "38", type_name: "棒球" },
   ];
 }
 
 function getFilters() {
-  return {
-    "1": [
-      {
-        key: "cateId",
-        name: "类型",
-        value: [
-          { n: "NBA", v: "1" },
-          { n: "CBA", v: "2" },
-          { n: "篮球综合", v: "4" },
-          { n: "纬来体育", v: "21" },
-        ],
-      },
-    ],
-    "8": [
-      {
-        key: "cateId",
-        name: "类型",
-        value: [
-          { n: "英超", v: "8" },
-          { n: "西甲", v: "9" },
-          { n: "意甲", v: "10" },
-          { n: "欧冠", v: "12" },
-          { n: "欧联", v: "13" },
-          { n: "德甲", v: "14" },
-          { n: "法甲", v: "15" },
-          { n: "欧国联", v: "16" },
-          { n: "足总杯", v: "27" },
-          { n: "国王杯", v: "33" },
-          { n: "中超", v: "7" },
-          { n: "亚冠", v: "11" },
-          { n: "足球综合", v: "23" },
-          { n: "欧协联", v: "28" },
-          { n: "美职联", v: "26" },
-        ],
-      },
-    ],
-  };
+  return {};
 }
 
 /**
@@ -217,10 +221,8 @@ async function getCategoryList(type, extend = {}) {
     const $ = cheerio.load(response.data || "");
 
     const list = [];
-    $(".list-group-item").each((_, element) => {
+    $(".list-group-item.group-game-item").each((_, element) => {
       const $el = $(element);
-      const btnPrimary = $el.find(".btn.btn-primary");
-
       const time = $el.find(".category-game-time").text()?.trim() || "";
       const gameType = $el.find(".game-type").text()?.trim() || "";
       const teamNames = $el.find(".team-name");
@@ -230,21 +232,28 @@ async function getCategoryList(type, extend = {}) {
       const name = `${time} ${gameType} ${homeTeam} vs ${awayTeam}`.trim();
       if (!name || name === "vs") return;
 
-      let vid = HOST;
+      const payBtn = $el.find(".pay-btn");
+      const gameId = payBtn.attr("data-id") || "";
+
+      const btnPrimary = $el.find(".btn.btn-primary");
+      const btnDefault = $el.find(".btn.btn-default");
+      const btn = btnPrimary.length > 0 ? btnPrimary : btnDefault;
+
+      let playUrl = "";
       let remark = "暂无";
-      if (btnPrimary.length > 0) {
-        vid = `${HOST}${btnPrimary.attr("href") || ""}`;
-        remark = btnPrimary.text().trim() || "暂无";
-      } else {
-        vid = name;
+      if (btn.length > 0) {
+        playUrl = `${HOST}${btn.attr("href") || ""}`;
+        remark = btn.text().trim().replace(/\s+/g, " ") || "暂无";
       }
 
-      const imgs = $el.find("img");
-      let pic = imgs.length > 0 ? imgs.first().attr("src") : "";
+      const imgs = $el.find("img.team-logo");
+      let pic = imgs.length > 0 ? imgs.first().attr("data-src") || imgs.first().attr("src") || "" : "";
       if (!pic) pic = DEFAULT_PIC;
       if (!String(pic).startsWith("http")) pic = `${HOST}${pic}`;
 
-      const encodedId = e64(JSON.stringify({ vid, name }));
+      if (!gameId && !playUrl) return;
+
+      const encodedId = e64(JSON.stringify({ gameId, playUrl, name }));
       list.push({
         vod_id: encodedId,
         vod_name: name,
@@ -272,51 +281,91 @@ async function getCategoryList(type, extend = {}) {
  */
 async function getDetailById(rawId) {
   try {
-    const { realId, displayName } = parseVodId(rawId);
+    const { realId, displayName, gameId, playUrl } = parseVodId(rawId);
 
-    if (!realId || realId === HOST) {
+    if (!realId && !gameId) {
       return null;
     }
 
-    const playUrlApi = `${realId}-url`;
-    const response = await axiosInstance.get(playUrlApi, {
-      headers: {
-        ...DEFAULT_HEADERS,
-        Referer: realId,
-      },
-    });
+    const gid = gameId || realId.match(/\/live\/(\d+)\//)?.[1] || "";
+    const pageUrl = playUrl || realId;
 
-    const links = parseLinksFromPlayApiResponse(response?.data);
-
-    const episodes = links
-      .filter((it) => it?.url)
-      .map((it, index) => {
-        const playData = {
-          url: String(it.url || "").replace(/\*\*\*/g, "#"),
+    if (gid) {
+      const playUrlApi = `${HOST}/live/${gid}/source`;
+      try {
+        const response = await axiosInstance.get(playUrlApi, {
           headers: {
             ...DEFAULT_HEADERS,
-            Referer: realId,
+            Referer: `${HOST}/live/${gid}/play`,
           },
-          name: String(it.name || `直播源${index + 1}`),
-        };
-        return {
-          name: String(it.name || `直播源${index + 1}`),
-          playId: e64(JSON.stringify(playData)),
-        };
-      });
+        });
 
-    return {
-      vod_id: realId,
-      vod_name: displayName,
-      vod_pic: "",
-      vod_content: "实时体育直播",
-      vod_play_sources: [
-        {
-          name: "88看球",
-          episodes,
+        const links = parseLinksFromPlayApiResponse(response?.data);
+
+        if (links && links.length > 0) {
+          const episodes = links
+            .filter((it) => it?.url)
+            .map((it, index) => {
+              const playData = {
+                url: String(it.url || "").replace(/\*\*\*/g, "#"),
+                headers: {
+                  ...DEFAULT_HEADERS,
+                  Referer: `${HOST}/live/${gid}/play`,
+                },
+                name: String(it.name || `直播源${index + 1}`),
+              };
+              return {
+                name: String(it.name || `直播源${index + 1}`),
+                playId: e64(JSON.stringify(playData)),
+              };
+            });
+
+          return {
+            vod_id: realId || gid,
+            vod_name: displayName,
+            vod_pic: "",
+            vod_content: "实时体育直播",
+            vod_play_sources: [
+              {
+                name: "88看球",
+                episodes,
+              },
+            ],
+          };
+        }
+      } catch (apiError) {
+        logError("source 接口失败，回退到页面直链", apiError);
+      }
+    }
+
+    if (pageUrl && pageUrl.startsWith("http")) {
+      const playData = {
+        url: pageUrl,
+        headers: {
+          ...DEFAULT_HEADERS,
         },
-      ],
-    };
+        name: "直播页",
+      };
+      return {
+        vod_id: realId || gid,
+        vod_name: displayName,
+        vod_pic: "",
+        vod_content: "实时体育直播",
+        vod_play_sources: [
+          {
+            name: "88看球",
+            episodes: [
+              {
+                name: "直播页",
+                playId: e64(JSON.stringify(playData)),
+              },
+            ],
+          },
+        ],
+      };
+    }
+
+    return null;
   } catch (error) {
     logError("获取详情失败", error);
     return null;
@@ -361,7 +410,7 @@ async function home(params) {
  */
 async function category(params) {
   try {
-    const type = params?.id || "";
+    const type = params?.id || params?.categoryId || params?.tid || "";
     const extend = params?.extend || params?.filters || {};
     const result = await getCategoryList(type, extend);
 

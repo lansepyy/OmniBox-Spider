@@ -2,7 +2,7 @@
 // @author @PFR001, @lucky_TJQ
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, cheerio
-// @version 1.2.4
+// @version 1.2.5
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/在线之家.js
 
 /**
@@ -541,6 +541,97 @@ const parseVideoList = ($, baseURL = "") => {
     return list;
 };
 
+// ========== 分类与筛选配置 ==========
+const CLASS_LIST = [
+    { type_id: '1', type_name: '电影' },
+    { type_id: '2', type_name: '美剧' },
+    { type_id: '3', type_name: '韩剧' },
+    { type_id: '4', type_name: '日剧' },
+    { type_id: '5', type_name: '泰剧' },
+    { type_id: '6', type_name: '动漫' }
+];
+
+const buildFilterOptions = (values = [], allName = "全部") => [
+    { name: allName, value: "" },
+    ...values.filter(Boolean).map((item) => ({ name: item, value: item }))
+];
+
+const buildYearOptions = () => {
+    const currentYear = Math.max(new Date().getFullYear(), 2026);
+    const years = [];
+    for (let year = currentYear; year >= 2000; year--) {
+        years.push(String(year));
+    }
+    return buildFilterOptions(years);
+};
+
+const buildFilterList = ({ classes = [], areas = [], includeClass = true, includeArea = true } = {}) => {
+    const list = [];
+    if (includeClass && classes.length > 0) {
+        list.push({ key: "class", name: "按剧情", init: "", value: buildFilterOptions(classes) });
+    }
+    if (includeArea && areas.length > 0) {
+        list.push({ key: "area", name: "按地区", init: "", value: buildFilterOptions(areas) });
+    }
+    list.push({ key: "year", name: "按年份", init: "", value: buildYearOptions() });
+    return list;
+};
+
+const DRAMA_CLASSES = ["剧情", "喜剧", "爱情", "动作", "悬疑", "恐怖", "奇幻", "惊悚", "犯罪", "科幻", "音乐", "其他"];
+
+const FILTERS = {
+    "1": buildFilterList({
+        classes: ["喜剧", "爱情", "恐怖", "动作", "科幻", "剧情", "战争", "警匪", "犯罪", "动画", "奇幻", "冒险", "悬疑", "惊悚", "青春", "情色"],
+        areas: ["大陆", "香港", "台湾", "欧美", "韩国", "日本", "泰国", "印度", "俄罗斯", "其他"]
+    }),
+    "2": buildFilterList({ classes: DRAMA_CLASSES, areas: ["欧美"] }),
+    "3": buildFilterList({ classes: DRAMA_CLASSES, areas: ["韩国"] }),
+    "4": buildFilterList({ classes: DRAMA_CLASSES, areas: ["日本"] }),
+    "5": buildFilterList({ includeClass: false, includeArea: false }),
+    "6": buildFilterList({
+        classes: ["情感", "科幻", "热血", "推理", "搞笑", "冒险", "萝莉", "校园", "动作", "机战", "运动", "战争", "少年", "少女", "社会", "原创", "亲子", "益智", "励志", "其他"],
+        areas: ["国产", "日本", "欧美", "其他"]
+    })
+};
+
+const parseFilters = (filters) => {
+    if (!filters) return {};
+    if (typeof filters === "object") return filters;
+    if (typeof filters === "string") {
+        try {
+            const parsed = JSON.parse(filters);
+            return parsed && typeof parsed === "object" ? parsed : {};
+        } catch {
+            return {};
+        }
+    }
+    return {};
+};
+
+const normalizeFilters = (...sources) => Object.assign({}, ...sources.map(parseFilters));
+
+const getFilterValue = (filters, keys = []) => {
+    for (const key of keys) {
+        const value = filters?.[key];
+        if (value !== undefined && value !== null && String(value).trim() !== "") {
+            return String(value).trim();
+        }
+    }
+    return "";
+};
+
+const encodeVodshowPart = (value) => encodeURIComponent(String(value || "").trim());
+
+const buildCategoryUrl = (categoryId, page, filters = {}) => {
+    const tid = encodeVodshowPart(categoryId || "1");
+    const area = encodeVodshowPart(getFilterValue(filters, ["area"]));
+    const by = encodeVodshowPart(getFilterValue(filters, ["by", "sort"]));
+    const genre = encodeVodshowPart(getFilterValue(filters, ["class", "type", "genre"]));
+    const year = encodeVodshowPart(getFilterValue(filters, ["year"]));
+    const pg = Math.max(1, parseInt(page) || 1);
+    return `${host}/vodshow/${tid}-${area}-${by}-${genre}-----${pg}---${year}.html`;
+};
+
 // ========== 核心功能函数 ==========
 
 /**
@@ -557,14 +648,9 @@ async function home(params, context) {
 
     logInfo(`获取到 ${list.length} 个视频`);
     return {
-        list: list, class: [
-            { type_id: '1', type_name: '电影' },
-            { type_id: '2', type_name: '美剧' },
-            { type_id: '3', type_name: '韩剧' },
-            { type_id: '4', type_name: '日剧' },
-            { type_id: '5', type_name: '泰剧' },
-            { type_id: '6', type_name: '动漫' }
-        ]
+        list: list,
+        class: CLASS_LIST,
+        filters: FILTERS
     };
 }
 
@@ -572,22 +658,24 @@ async function home(params, context) {
  * 分类
  */
 async function category(params, context) {
-    const { categoryId, page } = params;
+    const categoryId = String(params.categoryId || params.type_id || "1");
+    const filters = normalizeFilters(params.extend, params.ext, params.filter, params.filters);
+    const { page } = params;
     const pg = parseInt(page) || 1;
     const baseURL = context?.baseURL || "";
-    logInfo(`请求分类: ${categoryId}, 页码: ${pg}`);
+    logInfo(`请求分类: ${categoryId}, 页码: ${pg}, 筛选: ${JSON.stringify(filters)}`);
 
     try {
-        const url = `${host}/vodshow/${categoryId}--------${pg}---.html`;
+        const url = buildCategoryUrl(categoryId, pg, filters);
         const html = await requestHtml(url);
         const $ = cheerio.load(html || "");
         const list = parseVideoList($, baseURL);
 
         logInfo(`获取到 ${list.length} 个视频`);
-        return { list: list, page: pg, pagecount: list.length >= 12 ? pg + 1 : pg };
+        return { list: list, page: pg, pagecount: list.length >= 12 ? pg + 1 : pg, filters: FILTERS[categoryId] || [] };
     } catch (e) {
         logError("分类请求失败", e);
-        return { list: [], page: pg, pagecount: 0 };
+        return { list: [], page: pg, pagecount: 0, filters: FILTERS[categoryId] || [] };
     }
 }
 

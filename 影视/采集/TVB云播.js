@@ -1,8 +1,8 @@
 // @name TVB云播
 // @author 
-// @description 刮削：支持，弹幕：支持，嗅探：支持
-// @dependencies: axios, cheerio
-// @version 1.0.2
+// @description 刮削：支持，弹幕：支持，嗅探：支持，滑块验证：支持
+// @dependencies: axios, cheerio, crypto
+// @version 1.2.0
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/TVB云播.js
 
 
@@ -18,17 +18,20 @@
  * 环境变量：
  * - `TVBYB_HOST`：站点地址，默认 `http://www.viptv01.com`
  * - `DANMU_API`：弹幕服务地址（可选）
+ * - `DDDDOCR_API` / `TVBYB_DDDDOCR_API`：外部滑块验证服务地址（可选）
  */
 
 const axios = require("axios");
 const http = require("http");
 const https = require("https");
 const cheerio = require("cheerio");
+const crypto = require("crypto");
 const OmniBox = require("omnibox_sdk");
 
 // ==================== 配置区域 ====================
 const HOST = process.env.TVBYB_HOST || "http://www.viptv01.com";
 const DANMU_API = process.env.DANMU_API || "";
+const DDDDOCR_API = String(process.env.TVBYB_DDDDOCR_API || process.env.DDDDOCR_API || "").replace(/\/$/, "");
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
@@ -39,9 +42,174 @@ const DEFAULT_HEADERS = {
 
 const axiosInstance = axios.create({
   timeout: 30 * 1000,
+  validateStatus: () => true,
   httpsAgent: new https.Agent({ keepAlive: true, rejectUnauthorized: false }),
   httpAgent: new http.Agent({ keepAlive: true }),
 });
+
+const VERIFY_STORE = { cookie: "", verifiedAt: 0 };
+const VERIFY_CACHE_KEY = "tvbyb:verify-cookie";
+const VERIFY_TTL_MS = 30 * 60 * 1000;
+
+async function loadVerifyCache() {
+  if (VERIFY_STORE.cookie && Date.now() - VERIFY_STORE.verifiedAt < VERIFY_TTL_MS) {
+    return true;
+  }
+  try {
+    const cached = await OmniBox.getCache(VERIFY_CACHE_KEY);
+    if (!cached) return false;
+    const parsed = typeof cached === "string" ? JSON.parse(cached) : cached;
+    const cookie = String(parsed?.cookie || "").trim();
+    const verifiedAt = Number(parsed?.verifiedAt || 0);
+    if (cookie && Date.now() - verifiedAt < VERIFY_TTL_MS) {
+      VERIFY_STORE.cookie = cookie;
+      VERIFY_STORE.verifiedAt = verifiedAt;
+      return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
+async function saveVerifyCache() {
+  VERIFY_STORE.verifiedAt = Date.now();
+  try {
+    await OmniBox.setCache(
+      VERIFY_CACHE_KEY,
+      JSON.stringify({ cookie: VERIFY_STORE.cookie, verifiedAt: VERIFY_STORE.verifiedAt }),
+      Math.ceil(VERIFY_TTL_MS / 1000)
+    );
+  } catch (_) {}
+}
+
+async function clearVerifyCache() {
+  VERIFY_STORE.cookie = "";
+  VERIFY_STORE.verifiedAt = 0;
+  try {
+    await OmniBox.setCache(VERIFY_CACHE_KEY, JSON.stringify({ cookie: "", verifiedAt: 0 }), 1);
+  } catch (_) {}
+}
+
+function md5(text) {
+  return crypto.createHash("md5").update(String(text || ""), "utf8").digest("hex");
+}
+
+function stringtoHex(acSTR) {
+  let val = "";
+  for (let i = 0; i <= acSTR.length - 1; i++) val += parseInt(acSTR.charCodeAt(i)) + 1;
+  return val;
+}
+
+function mergeCookie(oldCookie, setCookie) {
+  const jar = {};
+  String(oldCookie || "").split(";").map(s => s.trim()).filter(Boolean).forEach(kv => {
+    const p = kv.indexOf("=");
+    if (p > 0) jar[kv.slice(0, p)] = kv.slice(p + 1);
+  });
+  const arr = Array.isArray(setCookie) ? setCookie : (setCookie ? [setCookie] : []);
+  arr.forEach(c => {
+    const first = String(c).split(";")[0];
+    const p = first.indexOf("=");
+    if (p > 0) jar[first.slice(0, p)] = first.slice(p + 1);
+  });
+  return Object.entries(jar).map(([k, v]) => `${k}=${v}`).join("; ");
+}
+
+function isVerifyPage(html) {
+  const text = String(html || "");
+  return text.includes("滑动验证") || text.includes("huadong_") || text.includes("yanzheng_huadong.php");
+}
+
+async function tryExternalVerify(pageHtml) {
+  if (!DDDDOCR_API) return false;
+  try {
+    const res = await axiosInstance.post(`${DDDDOCR_API}/verify`, {
+      url: HOST,
+      html: String(pageHtml || ""),
+      cookie: VERIFY_STORE.cookie,
+      type: "tvb_huadong",
+    }, {
+      headers: { "Content-Type": "application/json", ...DEFAULT_HEADERS },
+      timeout: 8000,
+    });
+    const data = typeof res.data === "object" ? res.data : {};
+    const cookie = data.cookie || data.cookies || (data.data && data.data.cookie) || (data.data && data.data.cookies);
+    if (cookie) {
+      VERIFY_STORE.cookie = mergeCookie(VERIFY_STORE.cookie, String(cookie).split(/;\s*/).map(x => x));
+      return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
+async function passSliderVerify(html) {
+  try {
+    if (await tryExternalVerify(html)) return true;
+
+    const scriptPath = (String(html || "").match(/src=["']([^"']*huadong_[^"']+\.js\?id=\d+)["']/i) || [])[1];
+    if (!scriptPath) return false;
+    const scriptUrl = scriptPath.startsWith("http") ? scriptPath : `${HOST}${scriptPath}`;
+    const jsRes = await axiosInstance.get(scriptUrl, {
+      headers: { ...DEFAULT_HEADERS, Cookie: VERIFY_STORE.cookie, Referer: `${HOST}/` },
+    });
+    VERIFY_STORE.cookie = mergeCookie(VERIFY_STORE.cookie, jsRes.headers && jsRes.headers["set-cookie"]);
+    const js = String(jsRes.data || "");
+    const key = (js.match(/key\s*=\s*["']([^"']+)["']/) || [])[1];
+    const value = (js.match(/value\s*=\s*["']([^"']+)["']/) || [])[1];
+    const verifyPath = (js.match(/c\.get\(["']([^"']*yanzheng_huadong\.php\?[^"']*)["']\s*\+/) || [])[1]
+      || (js.match(/([\w_\/.-]*yanzheng_huadong\.php\?type=[^"']+)&key=/) || [])[1];
+    if (!key || !value || !verifyPath) return false;
+
+    const verifyUrl = verifyPath.includes("&key=")
+      ? `${HOST}${verifyPath}${encodeURIComponent(key)}&value=${md5(stringtoHex(value))}`
+      : `${HOST}${verifyPath}&key=${encodeURIComponent(key)}&value=${md5(stringtoHex(value))}`;
+    const verifyRes = await axiosInstance.get(verifyUrl, {
+      headers: { ...DEFAULT_HEADERS, Cookie: VERIFY_STORE.cookie, Referer: `${HOST}/` },
+    });
+    VERIFY_STORE.cookie = mergeCookie(VERIFY_STORE.cookie, verifyRes.headers && verifyRes.headers["set-cookie"]);
+    logInfo(`滑块验证完成 status=${verifyRes.status}`);
+    return verifyRes.status >= 200 && verifyRes.status < 400;
+  } catch (e) {
+    logError("滑块验证失败", e);
+    return false;
+  }
+}
+
+async function requestWithVerify(url, options = {}) {
+  await loadVerifyCache();
+  const headers = { ...DEFAULT_HEADERS, ...(options.headers || {}) };
+  if (VERIFY_STORE.cookie) headers.Cookie = VERIFY_STORE.cookie;
+  let res = await axiosInstance.get(url, { ...options, headers });
+  VERIFY_STORE.cookie = mergeCookie(VERIFY_STORE.cookie, res.headers && res.headers["set-cookie"]);
+
+  if (!VERIFY_STORE.verifiedAt && (res.status === 403 || isVerifyPage(res.data))) {
+    const ok = await passSliderVerify(res.data);
+    if (ok) {
+      await saveVerifyCache();
+      const retryHeaders = { ...headers, Cookie: VERIFY_STORE.cookie };
+      res = await axiosInstance.get(url, { ...options, headers: retryHeaders });
+      VERIFY_STORE.cookie = mergeCookie(VERIFY_STORE.cookie, res.headers && res.headers["set-cookie"]);
+      if (res.status === 403 || isVerifyPage(res.data)) {
+        await clearVerifyCache();
+      }
+    } else {
+      await clearVerifyCache();
+    }
+  } else if (VERIFY_STORE.verifiedAt && (res.status === 403 || isVerifyPage(res.data))) {
+    await clearVerifyCache();
+    const retryHeaders = { ...DEFAULT_HEADERS, ...(options.headers || {}) };
+    const ok = await passSliderVerify(res.data);
+    if (ok) {
+      await saveVerifyCache();
+      retryHeaders.Cookie = VERIFY_STORE.cookie;
+      res = await axiosInstance.get(url, { ...options, headers: retryHeaders });
+      VERIFY_STORE.cookie = mergeCookie(VERIFY_STORE.cookie, res.headers && res.headers["set-cookie"]);
+      if (res.status === 403 || isVerifyPage(res.data)) {
+        await clearVerifyCache();
+      }
+    }
+  }
+  return res;
+}
 
 // ==================== 日志工具 ====================
 function logInfo(message, data = null) {
@@ -286,7 +454,7 @@ function parseListHtml(html) {
 async function getCategoryList(tid, pg = 1) {
   try {
     const url = `${HOST}/vod/show/id/${tid}/page/${pg}.html`;
-    const response = await axiosInstance.get(url, { headers: { ...DEFAULT_HEADERS } });
+    const response = await requestWithVerify(url);
     const list = parseListHtml(response.data);
 
     return {
@@ -351,7 +519,7 @@ function convertPlayToSources(vodPlayFrom, vodPlayUrl, vodName = "", videoId = "
 async function getDetailById(id) {
   try {
     const detailUrl = toAbsUrl(id);
-    const response = await axiosInstance.get(detailUrl, { headers: { ...DEFAULT_HEADERS } });
+    const response = await requestWithVerify(detailUrl);
     const $ = cheerio.load(response.data || "");
 
     const vod = {
@@ -518,7 +686,7 @@ async function search(params) {
 
   for (const url of candidates) {
     try {
-      const response = await axiosInstance.get(url, { headers: { ...DEFAULT_HEADERS } });
+      const response = await requestWithVerify(url);
       const list = parseListHtml(response.data);
       if (list.length > 0) {
         return {
@@ -599,7 +767,7 @@ async function play(params) {
 
   try {
     const playPageUrl = toAbsUrl(rawPlayId);
-    const response = await axiosInstance.get(playPageUrl, { headers: { ...DEFAULT_HEADERS } });
+    const response = await requestWithVerify(playPageUrl);
     const playerData = parsePlayJsonFromHtml(response.data || "");
 
     if (!playerData || !playerData.url) {

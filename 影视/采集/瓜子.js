@@ -1160,7 +1160,8 @@ async function play(params) {
         if (parts.length < 2) {
             playResponse = {
                 urls: [{ name: '播放', url: playId }],
-                header: {"User-Agent": "com.android.chrome/5.0.6 (Linux;Android 9)  AndroidXMedia3/1.9.2"},
+                header: {"User-Agent": "Lavf/57.83.100"},
+                // header: {"User-Agent": "com.android.chrome/5.0.6 (Linux;Android 9)  AndroidXMedia3/1.9.2"},
                 parse: 0 
             };
         } else {
@@ -1186,7 +1187,8 @@ async function play(params) {
 
             playResponse = {
                 urls: [{ name: '播放', url: playUrl }],
-                header: {"User-Agent": "com.android.chrome/5.0.6 (Linux;Android 9)  AndroidXMedia3/1.9.2"},
+                header: {"User-Agent": "Lavf/57.83.100"},
+                // header: {"User-Agent": "com.android.chrome/5.0.6 (Linux;Android 9)  AndroidXMedia3/1.9.2"},
                 parse: 0
             };
         }

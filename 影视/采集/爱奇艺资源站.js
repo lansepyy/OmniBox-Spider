@@ -27,7 +27,7 @@ const axios = require("axios");
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");
 
-const HOST = "https://iqiyizy.cc";
+const HOST = "https://iqiyizyapi.com";
 const API = `${HOST}/api.php/provide/vod`;
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
 

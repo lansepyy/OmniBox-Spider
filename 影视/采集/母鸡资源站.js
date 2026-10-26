@@ -2,19 +2,8 @@
 // @author OpenClaw Bingbu + 梦
 // @description 刮削：支持，弹幕：支持，嗅探：支持，观看记录：支持，广告：菠菜
 // @dependencies: axios
-// @version 1.1.3
+// @version 1.1.4
 // @downloadURL https://gh-proxy.org/https://github.com/lansepyy/OmniBox-Spider/raw/refs/heads/main/影视/采集/母鸡资源站.js
-
-/**
- * ============================================================================
- * 母鸡资源站 OmniBox 站源（增强版）
- * 站点: https://mujiziyuan00.com
- * 接口: /api.php/provide/vod
- * 
- * 更新日志：
- * - v1.1.3: 调整为「采集站原图优先，TMDB海报补充」；优化列表页读取刮削数据的容错；修复剧集名称乱码。
- * ============================================================================
- */
 
 const axios = require("axios");
 const OmniBox = require("omnibox_sdk");
@@ -33,49 +22,10 @@ const MAIN_CATEGORIES = [
 ];
 
 const MAIN_CHILDREN_FALLBACK = {
-  "7": [
-    { type_id: "5", type_name: "动漫电影" },
-    { type_id: "10", type_name: "动作片" },
-    { type_id: "11", type_name: "喜剧片" },
-    { type_id: "12", type_name: "爱情片" },
-    { type_id: "13", type_name: "科幻片" },
-    { type_id: "14", type_name: "恐怖片" },
-    { type_id: "15", type_name: "剧情片" },
-    { type_id: "16", type_name: "战争片" },
-    { type_id: "17", type_name: "惊悚片" },
-    { type_id: "18", type_name: "家庭片" },
-    { type_id: "19", type_name: "古装片" },
-    { type_id: "20", type_name: "历史片" },
-    { type_id: "21", type_name: "悬疑片" },
-    { type_id: "22", type_name: "犯罪片" },
-    { type_id: "23", type_name: "灾难片" },
-    { type_id: "24", type_name: "记录片" },
-    { type_id: "25", type_name: "短片" }
-  ],
-  "8": [
-    { type_id: "26", type_name: "国产剧" },
-    { type_id: "27", type_name: "香港剧" },
-    { type_id: "28", type_name: "韩国剧" },
-    { type_id: "29", type_name: "欧美剧" },
-    { type_id: "30", type_name: "台湾剧" },
-    { type_id: "31", type_name: "日本剧" },
-    { type_id: "32", type_name: "海外剧" },
-    { type_id: "33", type_name: "泰国剧" },
-    { type_id: "38", type_name: "短剧" }
-  ],
-  "9": [
-    { type_id: "34", type_name: "大陆综艺" },
-    { type_id: "35", type_name: "港台综艺" },
-    { type_id: "36", type_name: "日韩综艺" },
-    { type_id: "37", type_name: "欧美综艺" }
-  ],
-  "40": [
-    { type_id: "1", type_name: "国产动漫" },
-    { type_id: "2", type_name: "日韩动漫" },
-    { type_id: "3", type_name: "欧美动漫" },
-    { type_id: "4", type_name: "港台动漫" },
-    { type_id: "6", type_name: "里番动漫" }
-  ],
+  "7": [ { type_id: "5", type_name: "动漫电影" }, { type_id: "10", type_name: "动作片" }, { type_id: "11", type_name: "喜剧片" }, { type_id: "12", type_name: "爱情片" }, { type_id: "13", type_name: "科幻片" }, { type_id: "14", type_name: "恐怖片" }, { type_id: "15", type_name: "剧情片" }, { type_id: "16", type_name: "战争片" }, { type_id: "17", type_name: "惊悚片" }, { type_id: "18", type_name: "家庭片" }, { type_id: "19", type_name: "古装片" }, { type_id: "20", type_name: "历史片" }, { type_id: "21", type_name: "悬疑片" }, { type_id: "22", type_name: "犯罪片" }, { type_id: "23", type_name: "灾难片" }, { type_id: "24", type_name: "记录片" }, { type_id: "25", type_name: "短片" } ],
+  "8": [ { type_id: "26", type_name: "国产剧" }, { type_id: "27", type_name: "香港剧" }, { type_id: "28", type_name: "韩国剧" }, { type_id: "29", type_name: "欧美剧" }, { type_id: "30", type_name: "台湾剧" }, { type_id: "31", type_name: "日本剧" }, { type_id: "32", type_name: "海外剧" }, { type_id: "33", type_name: "泰国剧" }, { type_id: "38", type_name: "短剧" } ],
+  "9": [ { type_id: "34", type_name: "大陆综艺" }, { type_id: "35", type_name: "港台综艺" }, { type_id: "36", type_name: "日韩综艺" }, { type_id: "37", type_name: "欧美综艺" } ],
+  "40": [ { type_id: "1", type_name: "国产动漫" }, { type_id: "2", type_name: "日韩动漫" }, { type_id: "3", type_name: "欧美动漫" }, { type_id: "4", type_name: "港台动漫" }, { type_id: "6", type_name: "里番动漫" } ],
   "39": []
 };
 
@@ -111,9 +61,10 @@ function text(v) {
   return String(v == null ? "" : v).trim();
 }
 
+// 处理网址，兼容 <nil> 的情况
 function fixUrl(url) {
   const u = text(url);
-  if (!u) return "";
+  if (!u || u === "<nil>") return "";
   if (/^https?:\/\//i.test(u)) return u;
   if (u.startsWith("//")) return `https:${u}`;
   if (u.startsWith("/")) return `${HOST}${u}`;
@@ -207,85 +158,85 @@ function isMainBlocked(mainTypeId) {
 }
 
 // ==========================================
-// 核心修复：采集站原图优先，TMDB 补充
+// 核心修复：借鉴无水印.js，批量请求详情补全封面
 // ==========================================
-async function mapListItem(item) {
-  const typeId = text(item.type_id || "");
-  const mainTypeId = resolveMainTypeId(typeId, item.type_id_1 || "");
-  const vodId = text(item.vod_id);
-  
-  // 1. 优先获取采集站原图
-  let vodPic = fixUrl(item.vod_pic);
-  let vodName = text(item.vod_name);
-  let vodRemarks = text(item.vod_remarks || item.type_name || "");
-  let vodDoubanScore = text(item.vod_douban_score || "");
-  let vodYear = text(item.vod_year || "");
+async function enrichVideosWithDetails(rawList) {
+  if (!Array.isArray(rawList) || rawList.length === 0) return [];
 
-  // 2. 尝试获取已经刮削的 TMDB 数据（用于补充）
-  if (vodId) {
-    try {
-      const metadata = await OmniBox.getScrapeMetadata(vodId);
-      if (metadata && metadata.scrapeData) {
-        const sd = metadata.scrapeData;
-        
-        // 【重点修改】：仅当采集站没有图时，才使用 TMDB 图
-        if (!vodPic) {
-          const posterPath = sd.posterPath || sd.poster_path;
-          if (posterPath) {
-            // 加 wsrv.nl 代理，防止国内加载图片失败
-            vodPic = `https://wsrv.nl/?url=image.tmdb.org/t/p/w300${posterPath}`;
-          }
+  // 1. 先做基础转换
+  const videos = rawList.map((item) => {
+    const typeId = text(item.type_id || "");
+    const mainTypeId = resolveMainTypeId(typeId, item.type_id_1 || "");
+    return {
+      vod_id: text(item.vod_id),
+      vod_name: text(item.vod_name),
+      vod_pic: fixUrl(item.vod_pic),
+      vod_remarks: text(item.vod_remarks || item.type_name || ""),
+      type_id: typeId,
+      type_name: text(item.type_name || ""),
+      main_type_id: mainTypeId,
+      vod_year: text(item.vod_year || ""),
+      vod_douban_score: text(item.vod_douban_score || ""),
+      // 用于标记是否缺少图片
+      _needDetail: !item.vod_pic || item.vod_pic === "<nil>" || item.vod_pic === ""
+    };
+  });
+
+  // 2. 找出缺少封面的视频，批量去请求详情接口获取图片
+  const needDetailVideos = videos.filter(v => v._needDetail);
+  if (needDetailVideos.length > 0) {
+    const batchSize = 20;
+    for (let i = 0; i < needDetailVideos.length; i += batchSize) {
+      const batch = needDetailVideos.slice(i, i + batchSize);
+      const ids = batch.map(v => v.vod_id).join(",");
+      try {
+        const detailData = await fetchApi({ ac: "detail", ids });
+        if (Array.isArray(detailData.list)) {
+          detailData.list.forEach(detailItem => {
+            const vid = text(detailItem.vod_id);
+            const target = videos.find(v => v.vod_id === vid);
+            if (target) {
+              // 补全图片
+              const pic = fixUrl(detailItem.vod_pic);
+              if (pic) target.vod_pic = pic;
+              // 补全年份和评分
+              const year = text(detailItem.vod_year);
+              if (year && year !== "<nil>") target.vod_year = year;
+              const score = text(detailItem.vod_douban_score);
+              if (score && score !== "<nil>") target.vod_douban_score = score;
+            }
+          });
         }
-        
-        // 如果 TMDB 有评分，且采集站没有豆瓣分，就用 TMDB 评分补充
-        if (!vodDoubanScore && sd.voteAverage) {
-          vodDoubanScore = Number(sd.voteAverage).toFixed(1);
-        }
-        
-        // 如果采集站没年份，用 TMDB 的年份补充
-        if (!vodYear && sd.releaseDate) {
-          vodYear = sd.releaseDate.slice(0, 4);
-        }
+      } catch (error) {
+        await OmniBox.log("warn", `批量补全详情失败: ${error.message}`);
       }
-    } catch (e) {
-      // 忽略读取刮削数据失败的异常
     }
   }
 
-  return {
-    vod_id: vodId,
-    vod_name: vodName,
-    vod_pic: vodPic, // 优先原图，没有原图才用 TMDB
-    vod_remarks: vodRemarks,
-    type_id: typeId,
-    type_name: text(item.type_name || ""),
-    main_type_id: mainTypeId,
-    vod_year: vodYear,
-    vod_douban_score: vodDoubanScore
-  };
-}
+  // 3. 尝试用 TMDB 的已刮削数据作为最终兜底（如果没有图才用）
+  const finalList = await Promise.all(videos.map(async (v) => {
+    delete v._needDetail;
+    
+    // 如果连详情接口都拿不到图，试试本地有没有刮削过
+    if (!v.vod_pic && v.vod_id) {
+      try {
+        const metadata = await OmniBox.getScrapeMetadata(v.vod_id);
+        if (metadata?.scrapeData) {
+          const sd = metadata.scrapeData;
+          const posterPath = sd.posterPath || sd.poster_path;
+          if (posterPath) {
+            v.vod_pic = `https://wsrv.nl/?url=image.tmdb.org/t/p/w300${posterPath}`;
+          }
+          if (!v.vod_douban_score && sd.voteAverage) {
+            v.vod_douban_score = Number(sd.voteAverage).toFixed(1);
+          }
+        }
+      } catch (e) {}
+    }
+    return v;
+  }));
 
-async function processListAsync(rawList) {
-  if (!Array.isArray(rawList) || !rawList.length) return [];
-  const results = [];
-  const concurrencyLimit = 10; 
-
-  for (let i = 0; i < rawList.length; i += concurrencyLimit) {
-    const chunk = rawList.slice(i, i + concurrencyLimit);
-    const chunkResults = await Promise.all(
-      chunk.map(item => mapListItem(item).catch(() => ({
-        vod_id: text(item.vod_id),
-        vod_name: text(item.vod_name),
-        vod_pic: fixUrl(item.vod_pic),
-        vod_remarks: text(item.vod_remarks),
-        type_id: text(item.type_id),
-        type_name: text(item.type_name),
-        main_type_id: resolveMainTypeId(item.type_id, item.type_id_1)
-      })))
-    );
-    results.push(...chunkResults);
-  }
-  return results;
+  return finalList;
 }
 
 function buildResourceId(vodId) {
@@ -302,8 +253,6 @@ function parsePlaySources(vodPlayFrom, vodPlayUrl, vodId, vodName = "") {
   const sourceCount = Math.max(fromArr.length, urlArr.length);
   const sources = [];
   const videoFiles = [];
-
-  // 清理剧名，用于构造标准文件名辅助刮削
   const cleanVodName = text(vodName).replace(/[\s\.]+/g, '.');
 
   for (let i = 0; i < sourceCount; i += 1) {
@@ -324,7 +273,6 @@ function parsePlaySources(vodPlayFrom, vodPlayUrl, vodId, vodName = "") {
       videoFiles.push({
         fid: fileId,
         file_id: fileId,
-        // 使用标准命名格式辅助刮削，但不影响前端显示
         file_name: `${cleanVodName}.S01E${String(idx + 1).padStart(2, '0')}`,
         name: epName,
         format_type: "video"
@@ -348,7 +296,6 @@ function parsePlaySources(vodPlayFrom, vodPlayUrl, vodId, vodName = "") {
       sources.push({ name: flag, episodes });
     }
   }
-
   return { sources, videoFiles };
 }
 
@@ -358,9 +305,7 @@ async function enrichPlaySourcesWithMetadata(playSources, resourceId) {
     const scrapeData = metadata?.scrapeData || null;
     const videoMappings = Array.isArray(metadata?.videoMappings) ? metadata.videoMappings : [];
 
-    if (!playSources.length || !videoMappings.length) {
-      return { playSources, scrapeData, metadata };
-    }
+    if (!playSources.length || !videoMappings.length) return { playSources, scrapeData, metadata };
 
     const mappingMap = new Map();
     for (const m of videoMappings) {
@@ -372,16 +317,7 @@ async function enrichPlaySourcesWithMetadata(playSources, resourceId) {
         const lookupKey = String(ep._fileId || "");
         const mapping = mappingMap.get(lookupKey);
         if (!mapping) continue;
-
-        // 修复集数名称重叠问题，不强制修改 ep.name
-        if (mapping.episodeName) {
-          ep.episodeName = mapping.episodeName;
-        }
-        if (mapping.episodeOverview) ep.episodeOverview = mapping.episodeOverview;
-        if (mapping.episodeAirDate) ep.episodeAirDate = mapping.episodeAirDate;
-        if (mapping.episodeStillPath) ep.episodeStillPath = mapping.episodeStillPath;
-        if (mapping.episodeVoteAverage != null) ep.episodeVoteAverage = mapping.episodeVoteAverage;
-        if (mapping.episodeRuntime != null) ep.episodeRuntime = mapping.episodeRuntime;
+        if (mapping.episodeName) ep.episodeName = mapping.episodeName;
         if (mapping.seasonNumber != null) ep._seasonNumber = mapping.seasonNumber;
         if (mapping.episodeNumber != null) ep._episodeNumber = mapping.episodeNumber;
       }
@@ -402,10 +338,8 @@ async function enrichPlaySourcesWithMetadata(playSources, resourceId) {
         delete ep._fileId;
       }
     }
-
     return { playSources, scrapeData, metadata };
   } catch (error) {
-    await OmniBox.log("warn", `获取刮削元数据失败: ${error.message}`);
     for (const source of playSources) {
       for (const ep of source.episodes || []) delete ep._fileId;
     }
@@ -447,22 +381,13 @@ async function fetchMainAllByChildren(mainTypeId, page) {
   if (!childTypeIds.length) {
     const direct = await fetchApi({ ac: "list", t: text(mainTypeId), pg: page });
     const rawList = (Array.isArray(direct.list) ? direct.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
-    const list = await processListAsync(rawList);
-    return {
-      list,
-      page: Number(direct.page || page || 1),
-      pagecount: Number(direct.pagecount || page || 1),
-      total: Number(direct.total || list.length || 0),
-      limit: Number(direct.limit || 20)
-    };
+    const list = await enrichVideosWithDetails(rawList); // 使用新的详情补全逻辑
+    return { list, page: Number(direct.page || page || 1), pagecount: Number(direct.pagecount || page || 1), total: Number(direct.total || list.length || 0), limit: Number(direct.limit || 20) };
   }
 
   const results = await Promise.all(childTypeIds.map((tid) => fetchApi({ ac: "list", t: tid, pg: page })));
   const mergedRaw = [];
-  let total = 0;
-  let pagecount = 0;
-  let limit = 20;
-
+  let total = 0, pagecount = 0, limit = 20;
   results.forEach((data) => {
     const arr = Array.isArray(data.list) ? data.list : [];
     mergedRaw.push(...arr);
@@ -478,9 +403,8 @@ async function fetchMainAllByChildren(mainTypeId, page) {
     return true;
   });
 
-  const list = await processListAsync(uniqueRaw);
+  const list = await enrichVideosWithDetails(uniqueRaw); // 使用新的详情补全逻辑
   list.sort((a, b) => Number(b.vod_id || 0) - Number(a.vod_id || 0));
-
   return { list, page, pagecount: pagecount || page, total: total || list.length, limit };
 }
 
@@ -507,24 +431,20 @@ function buildDanmakuFileName(scrapeData, mapping, fallbackTitle, fallbackEpName
   const title = text(scrapeData.title || fallbackTitle || "");
   const scrapeType = text(scrapeData.scrapeType || scrapeData.type || "").toLowerCase();
   const seasonAirYear = text(scrapeData.seasonAirYear || scrapeData.releaseDate || "").slice(0, 4);
-
   if (mapping && (mapping.episodeNumber != null || mapping.seasonNumber != null || scrapeType === "tv")) {
     const season = Number(mapping?.seasonNumber || 1);
     const episode = Number(mapping?.episodeNumber || 1);
     const yearPart = seasonAirYear ? `.${seasonAirYear}` : "";
     return `${title}${yearPart}.S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}`;
   }
-
   return title || `${fallbackTitle || ""} ${fallbackEpName || ""}`.trim();
 }
 
 async function home(params, context) {
   const data = await fetchApi({ ac: "list", pg: 1 });
   const classes = buildMainClasses();
-  
   const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
-  const list = await processListAsync(rawList);
-
+  const list = await enrichVideosWithDetails(rawList); // 使用新的详情补全逻辑
   const filters = {};
   classes.forEach((m) => {
     const f = buildFiltersForMain(m.type_id);
@@ -539,23 +459,14 @@ async function category(params, context) {
   const subtype = getFilterSubtype(params);
   await ensureClassCache();
 
-  if (isMainBlocked(mainTypeId)) {
-    return { list: [], page, pagecount: 0, total: 0, limit: 20 };
-  }
+  if (isMainBlocked(mainTypeId)) return { list: [], page, pagecount: 0, total: 0, limit: 20 };
 
   let result;
   if (!isAllSelection(subtype)) {
     const data = await fetchApi({ ac: "list", t: subtype, pg: page });
     const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
-    const list = await processListAsync(rawList);
-    
-    result = {
-      list,
-      page: Number(data.page || page || 1),
-      pagecount: Number(data.pagecount || page || 1),
-      total: Number(data.total || list.length || 0),
-      limit: Number(data.limit || 20)
-    };
+    const list = await enrichVideosWithDetails(rawList); // 使用新的详情补全逻辑
+    result = { list, page: Number(data.page || page || 1), pagecount: Number(data.pagecount || page || 1), total: Number(data.total || list.length || 0), limit: Number(data.limit || 20) };
   } else {
     result = await fetchMainAllByChildren(mainTypeId, page);
   }
@@ -572,15 +483,9 @@ async function search(params, context) {
 
   const data = await fetchApi({ ac: "list", wd: keyword, pg: page });
   const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
-  const list = await processListAsync(rawList);
+  const list = await enrichVideosWithDetails(rawList); // 使用新的详情补全逻辑
 
-  return {
-    list,
-    page: Number(data.page || page || 1),
-    pagecount: Number(data.pagecount || page || 1),
-    total: Number(data.total || list.length || 0),
-    limit: Number(data.limit || 20)
-  };
+  return { list, page: Number(data.page || page || 1), pagecount: Number(data.pagecount || page || 1), total: Number(data.total || list.length || 0), limit: Number(data.limit || 20) };
 }
 
 async function detail(params, context) {
@@ -600,11 +505,10 @@ async function detail(params, context) {
 
     let scrapeData = null;
     if (videoFiles.length > 0) {
-      const scrapeKeyword = buildScrapeKeyword(item);
       try {
-        await OmniBox.processScraping(resourceId, scrapeKeyword, text(item.vod_name), videoFiles);
+        await OmniBox.processScraping(resourceId, buildScrapeKeyword(item), text(item.vod_name), videoFiles);
       } catch (error) {
-        await OmniBox.log("warn", `[detail] processScraping 失败 resourceId=${resourceId}, error=${error.message}`);
+        await OmniBox.log("warn", `[detail] processScraping 失败: ${error.message}`);
       }
     }
 
@@ -612,15 +516,16 @@ async function detail(params, context) {
     const playSources = enriched.playSources;
     scrapeData = enriched.scrapeData;
 
-    // 兼容多种 TMDB 字段
     const posterPath = scrapeData?.posterPath || scrapeData?.poster_path || scrapeData?.poster;
     const originalPic = fixUrl(item.vod_pic);
+    
+    // 原图优先，没图才用 TMDB 补充
+    const finalPic = originalPic || (posterPath ? `https://wsrv.nl/?url=image.tmdb.org/t/p/w500${posterPath}` : "");
 
     const vod = {
       vod_id: text(item.vod_id),
       vod_name: text(scrapeData?.title || item.vod_name),
-      // 【重点修改】：详情页同样遵循原图优先，没原图才用 TMDB
-      vod_pic: originalPic || (posterPath ? `https://image.tmdb.org/t/p/w500${posterPath}` : ""),
+      vod_pic: finalPic,
       vod_remarks: text(item.vod_remarks),
       vod_year: text((scrapeData?.releaseDate || item.vod_year || "").slice?.(0, 4) || item.vod_year || ""),
       vod_area: text(item.vod_area),
@@ -652,12 +557,7 @@ async function play(params, context) {
     const epName = text(meta.epName || "");
 
     if (!url) {
-      return {
-        urls: [],
-        parse: 1,
-        header: { "User-Agent": UA, "Referer": `${HOST}/` },
-        danmaku: []
-      };
+      return { urls: [], parse: 1, header: { "User-Agent": UA, "Referer": `${HOST}/` }, danmaku: [] };
     }
 
     let danmaku = [];
@@ -699,20 +599,10 @@ async function play(params, context) {
       await OmniBox.log("warn", `[play] 添加观看记录失败: ${error.message}`);
     }
 
-    return {
-      urls: [{ name: epName || meta.flag || "播放", url }],
-      parse,
-      header,
-      danmaku: Array.isArray(danmaku) ? danmaku : []
-    };
+    return { urls: [{ name: epName || meta.flag || "播放", url }], parse, header, danmaku: Array.isArray(danmaku) ? danmaku : [] };
   } catch (error) {
     await OmniBox.log("error", `play 失败: ${error.message}`);
-    return {
-      urls: [],
-      parse: 1,
-      header: { "User-Agent": UA, "Referer": `${HOST}/` },
-      danmaku: []
-    };
+    return { urls: [], parse: 1, header: { "User-Agent": UA, "Referer": `${HOST}/` }, danmaku: [] };
   }
 }
 

@@ -2,18 +2,17 @@
 // @author OpenClaw Bingbu + 梦
 // @description 刮削：支持，弹幕：支持，嗅探：支持，观看记录：支持，广告：菠菜
 // @dependencies: axios
-// @version 1.1.2
+// @version 1.1.3
 // @downloadURL https://gh-proxy.org/https://github.com/lansepyy/OmniBox-Spider/raw/refs/heads/main/影视/采集/母鸡资源站.js
 
 /**
  * ============================================================================
  * 母鸡资源站 OmniBox 站源（增强版）
- * 站点: https://iqiyizyapi.com
+ * 站点: https://mujiziyuan00.com
  * 接口: /api.php/provide/vod
- *
+ * 
  * 更新日志：
- * - v1.1.2: 修复列表页(Tab页/首页)无海报问题，列表接口同步读取已刮削的 TMDB 数据，引入 wsrv.nl 加速图片
- * - v1.1.1: 支持 TMDB 刮削，弹幕匹配，观看记录
+ * - v1.1.3: 调整为「采集站原图优先，TMDB海报补充」；优化列表页读取刮削数据的容错；修复剧集名称乱码。
  * ============================================================================
  */
 
@@ -208,53 +207,55 @@ function isMainBlocked(mainTypeId) {
 }
 
 // ==========================================
-// 核心修复：异步处理列表项，拉取 TMDB 刮削数据
+// 核心修复：采集站原图优先，TMDB 补充
 // ==========================================
 async function mapListItem(item) {
   const typeId = text(item.type_id || "");
   const mainTypeId = resolveMainTypeId(typeId, item.type_id_1 || "");
   const vodId = text(item.vod_id);
   
+  // 1. 优先获取采集站原图
   let vodPic = fixUrl(item.vod_pic);
   let vodName = text(item.vod_name);
   let vodRemarks = text(item.vod_remarks || item.type_name || "");
   let vodDoubanScore = text(item.vod_douban_score || "");
   let vodYear = text(item.vod_year || "");
 
-  // 尝试获取已经刮削的 TMDB 数据，用于列表页展示
+  // 2. 尝试获取已经刮削的 TMDB 数据（用于补充）
   if (vodId) {
     try {
       const metadata = await OmniBox.getScrapeMetadata(vodId);
       if (metadata && metadata.scrapeData) {
         const sd = metadata.scrapeData;
         
-        // 1. 替换海报（使用 wsrv.nl 代理，防止国内加载不出 TMDB 图片）
-        const posterPath = sd.posterPath || sd.poster_path;
-        if (posterPath) {
-          vodPic = `https://wsrv.nl/?url=image.tmdb.org/t/p/w300${posterPath}`;
+        // 【重点修改】：仅当采集站没有图时，才使用 TMDB 图
+        if (!vodPic) {
+          const posterPath = sd.posterPath || sd.poster_path;
+          if (posterPath) {
+            // 加 wsrv.nl 代理，防止国内加载图片失败
+            vodPic = `https://wsrv.nl/?url=image.tmdb.org/t/p/w300${posterPath}`;
+          }
         }
         
-        // 2. 如果 TMDB 有评分，优先展示 TMDB 评分
-        if (sd.voteAverage) {
+        // 如果 TMDB 有评分，且采集站没有豆瓣分，就用 TMDB 评分补充
+        if (!vodDoubanScore && sd.voteAverage) {
           vodDoubanScore = Number(sd.voteAverage).toFixed(1);
         }
         
-        // 3. 拼接好看的备注信息（年份 + 评分 + 更新集数）
-        const yearStr = sd.releaseDate ? sd.releaseDate.slice(0, 4) : vodYear;
-        if (sd.voteAverage) {
-           // 如果你想在列表上看到评分，把下面这行注释打开
-           // vodRemarks = `⭐${Number(sd.voteAverage).toFixed(1)} | ${vodRemarks}`;
+        // 如果采集站没年份，用 TMDB 的年份补充
+        if (!vodYear && sd.releaseDate) {
+          vodYear = sd.releaseDate.slice(0, 4);
         }
       }
     } catch (e) {
-      // 如果本地没有刮削数据，忽略错误，直接使用原站数据
+      // 忽略读取刮削数据失败的异常
     }
   }
 
   return {
     vod_id: vodId,
     vod_name: vodName,
-    vod_pic: vodPic, // 修复：优先显示 TMDB 海报
+    vod_pic: vodPic, // 优先原图，没有原图才用 TMDB
     vod_remarks: vodRemarks,
     type_id: typeId,
     type_name: text(item.type_name || ""),
@@ -264,11 +265,10 @@ async function mapListItem(item) {
   };
 }
 
-// 批量处理列表，限制并发数防止接口超时
 async function processListAsync(rawList) {
   if (!Array.isArray(rawList) || !rawList.length) return [];
   const results = [];
-  const concurrencyLimit = 10; // 每次并发查 10 个 TMDB 缓存
+  const concurrencyLimit = 10; 
 
   for (let i = 0; i < rawList.length; i += concurrencyLimit) {
     const chunk = rawList.slice(i, i + concurrencyLimit);
@@ -303,7 +303,7 @@ function parsePlaySources(vodPlayFrom, vodPlayUrl, vodId, vodName = "") {
   const sources = [];
   const videoFiles = [];
 
-  // 统一清理剧名，用于生成标准命名的 file_id，提高刮削成功率
+  // 清理剧名，用于构造标准文件名辅助刮削
   const cleanVodName = text(vodName).replace(/[\s\.]+/g, '.');
 
   for (let i = 0; i < sourceCount; i += 1) {
@@ -324,7 +324,7 @@ function parsePlaySources(vodPlayFrom, vodPlayUrl, vodId, vodName = "") {
       videoFiles.push({
         fid: fileId,
         file_id: fileId,
-        // 修复：使用更标准的命名格式（剧名.S01Exx）辅助刮削，提高匹配率
+        // 使用标准命名格式辅助刮削，但不影响前端显示
         file_name: `${cleanVodName}.S01E${String(idx + 1).padStart(2, '0')}`,
         name: epName,
         format_type: "video"
@@ -373,11 +373,9 @@ async function enrichPlaySourcesWithMetadata(playSources, resourceId) {
         const mapping = mappingMap.get(lookupKey);
         if (!mapping) continue;
 
-        // 修复：不再强制覆盖 ep.name 导致前端变成 "1.第1集"
+        // 修复集数名称重叠问题，不强制修改 ep.name
         if (mapping.episodeName) {
           ep.episodeName = mapping.episodeName;
-          // 如果你想美化前端显示的集数名字，打开下面这行：
-          // ep.name = `第${String(mapping.episodeNumber).padStart(2, '0')}集`;
         }
         if (mapping.episodeOverview) ep.episodeOverview = mapping.episodeOverview;
         if (mapping.episodeAirDate) ep.episodeAirDate = mapping.episodeAirDate;
@@ -616,12 +614,13 @@ async function detail(params, context) {
 
     // 兼容多种 TMDB 字段
     const posterPath = scrapeData?.posterPath || scrapeData?.poster_path || scrapeData?.poster;
+    const originalPic = fixUrl(item.vod_pic);
 
     const vod = {
       vod_id: text(item.vod_id),
       vod_name: text(scrapeData?.title || item.vod_name),
-      // 详情页海报直接走后端解析，不经过代理也能显示，但统一用原图逻辑
-      vod_pic: posterPath ? `https://image.tmdb.org/t/p/w500${posterPath}` : fixUrl(item.vod_pic),
+      // 【重点修改】：详情页同样遵循原图优先，没原图才用 TMDB
+      vod_pic: originalPic || (posterPath ? `https://image.tmdb.org/t/p/w500${posterPath}` : ""),
       vod_remarks: text(item.vod_remarks),
       vod_year: text((scrapeData?.releaseDate || item.vod_year || "").slice?.(0, 4) || item.vod_year || ""),
       vod_area: text(item.vod_area),

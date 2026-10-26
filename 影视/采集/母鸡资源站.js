@@ -2,7 +2,7 @@
 // @author OpenClaw Bingbu + 梦
 // @description 刮削：支持，弹幕：支持，嗅探：支持，观看记录：支持，广告：菠菜
 // @dependencies: axios
-// @version 1.1.1
+// @version 1.1.2
 // @downloadURL https://gh-proxy.org/https://github.com/lansepyy/OmniBox-Spider/raw/refs/heads/main/影视/采集/母鸡资源站.js
 
 /**
@@ -11,15 +11,9 @@
  * 站点: https://iqiyizyapi.com
  * 接口: /api.php/provide/vod
  *
- * 新增能力：
- * - 支持 TMDB 刮削（detail 阶段触发 processScraping）
- * - 支持弹幕匹配（play 阶段通过 getDanmakuByFileName 获取）
- * - 支持观看记录（play 阶段 addPlayHistory）
- * - 保留原有：一级主类聚合、二级筛选、分类屏蔽、嗅探兼容
- *
- * 分类屏蔽配置：
- * - 环境变量 IQIYIZY_BLOCKED_MAIN
- * - 例："39" 或 "39,9"（按一级分类ID）
+ * 更新日志：
+ * - v1.1.2: 修复列表页(Tab页/首页)无海报问题，列表接口同步读取已刮削的 TMDB 数据，引入 wsrv.nl 加速图片
+ * - v1.1.1: 支持 TMDB 刮削，弹幕匹配，观看记录
  * ============================================================================
  */
 
@@ -213,48 +207,104 @@ function isMainBlocked(mainTypeId) {
   return getBlockedMainSet().has(text(mainTypeId));
 }
 
-function mapListItem(item) {
+// ==========================================
+// 核心修复：异步处理列表项，拉取 TMDB 刮削数据
+// ==========================================
+async function mapListItem(item) {
   const typeId = text(item.type_id || "");
   const mainTypeId = resolveMainTypeId(typeId, item.type_id_1 || "");
+  const vodId = text(item.vod_id);
+  
+  let vodPic = fixUrl(item.vod_pic);
+  let vodName = text(item.vod_name);
+  let vodRemarks = text(item.vod_remarks || item.type_name || "");
+  let vodDoubanScore = text(item.vod_douban_score || "");
+  let vodYear = text(item.vod_year || "");
+
+  // 尝试获取已经刮削的 TMDB 数据，用于列表页展示
+  if (vodId) {
+    try {
+      const metadata = await OmniBox.getScrapeMetadata(vodId);
+      if (metadata && metadata.scrapeData) {
+        const sd = metadata.scrapeData;
+        
+        // 1. 替换海报（使用 wsrv.nl 代理，防止国内加载不出 TMDB 图片）
+        const posterPath = sd.posterPath || sd.poster_path;
+        if (posterPath) {
+          vodPic = `https://wsrv.nl/?url=image.tmdb.org/t/p/w300${posterPath}`;
+        }
+        
+        // 2. 如果 TMDB 有评分，优先展示 TMDB 评分
+        if (sd.voteAverage) {
+          vodDoubanScore = Number(sd.voteAverage).toFixed(1);
+        }
+        
+        // 3. 拼接好看的备注信息（年份 + 评分 + 更新集数）
+        const yearStr = sd.releaseDate ? sd.releaseDate.slice(0, 4) : vodYear;
+        if (sd.voteAverage) {
+           // 如果你想在列表上看到评分，把下面这行注释打开
+           // vodRemarks = `⭐${Number(sd.voteAverage).toFixed(1)} | ${vodRemarks}`;
+        }
+      }
+    } catch (e) {
+      // 如果本地没有刮削数据，忽略错误，直接使用原站数据
+    }
+  }
+
   return {
-    vod_id: text(item.vod_id),
-    vod_name: text(item.vod_name),
-    vod_pic: fixUrl(item.vod_pic),
-    vod_remarks: text(item.vod_remarks || item.type_name || ""),
+    vod_id: vodId,
+    vod_name: vodName,
+    vod_pic: vodPic, // 修复：优先显示 TMDB 海报
+    vod_remarks: vodRemarks,
     type_id: typeId,
     type_name: text(item.type_name || ""),
     main_type_id: mainTypeId,
-    vod_year: text(item.vod_year || ""),
-    vod_douban_score: text(item.vod_douban_score || "")
+    vod_year: vodYear,
+    vod_douban_score: vodDoubanScore
   };
 }
 
+// 批量处理列表，限制并发数防止接口超时
+async function processListAsync(rawList) {
+  if (!Array.isArray(rawList) || !rawList.length) return [];
+  const results = [];
+  const concurrencyLimit = 10; // 每次并发查 10 个 TMDB 缓存
+
+  for (let i = 0; i < rawList.length; i += concurrencyLimit) {
+    const chunk = rawList.slice(i, i + concurrencyLimit);
+    const chunkResults = await Promise.all(
+      chunk.map(item => mapListItem(item).catch(() => ({
+        vod_id: text(item.vod_id),
+        vod_name: text(item.vod_name),
+        vod_pic: fixUrl(item.vod_pic),
+        vod_remarks: text(item.vod_remarks),
+        type_id: text(item.type_id),
+        type_name: text(item.type_name),
+        main_type_id: resolveMainTypeId(item.type_id, item.type_id_1)
+      })))
+    );
+    results.push(...chunkResults);
+  }
+  return results;
+}
+
 function buildResourceId(vodId) {
-  // 注意：OmniBox 刮削系统要求 resourceId 直接使用裸 videoId，不能加前缀
-  // 参考瓜子.js: processScraping(videoId, ...) / getScrapeMetadata(videoId)
   return text(vodId);
 }
 
 function buildEpisodeFileId(vodId, flag, epName, idx) {
-  // fileId 格式与瓜子.js 保持一致: `${videoId}#${index}`
-  // index 从 1 开始，多线路时加上 flag 区分，避免重复
   return `${text(vodId)}#${text(flag)}#${idx}`;
 }
 
 function parsePlaySources(vodPlayFrom, vodPlayUrl, vodId, vodName = "") {
-  // 这里做两件事：
-  // 1) 把资源站返回的旧格式 vod_play_from / vod_play_url 转成 OmniBox 推荐的新格式 vod_play_sources
-  // 2) 同时构造一份 videoFiles，供 processScraping(resourceId, keyword, resourceName, videoFiles) 使用
-  //
-  // 为什么要额外构造 videoFiles？
-  // 因为本源不是网盘源，没有天然的 fileId，刮削系统依赖 fileId 把“某一集”映射到 TMDB 的某一集。
-  // 所以这里人为构造一个稳定 fileId：iqiyizy:{vodId}:{flag}:{idx}:{epName}
-  // detail 阶段用它去刮削，play 阶段再把同一个 fileId 塞回 playId，这样就能在播放时找回映射关系。
   const fromArr = text(vodPlayFrom).split("$$$").map((s) => s.trim()).filter(Boolean);
   const urlArr = text(vodPlayUrl).split("$$$").map((s) => s.trim()).filter(Boolean);
   const sourceCount = Math.max(fromArr.length, urlArr.length);
   const sources = [];
   const videoFiles = [];
+
+  // 统一清理剧名，用于生成标准命名的 file_id，提高刮削成功率
+  const cleanVodName = text(vodName).replace(/[\s\.]+/g, '.');
 
   for (let i = 0; i < sourceCount; i += 1) {
     const flag = fromArr[i] || `线路${i + 1}`;
@@ -274,7 +324,8 @@ function parsePlaySources(vodPlayFrom, vodPlayUrl, vodId, vodName = "") {
       videoFiles.push({
         fid: fileId,
         file_id: fileId,
-        file_name: epName,
+        // 修复：使用更标准的命名格式（剧名.S01Exx）辅助刮削，提高匹配率
+        file_name: `${cleanVodName}.S01E${String(idx + 1).padStart(2, '0')}`,
         name: epName,
         format_type: "video"
       });
@@ -302,41 +353,12 @@ function parsePlaySources(vodPlayFrom, vodPlayUrl, vodId, vodName = "") {
 }
 
 async function enrichPlaySourcesWithMetadata(playSources, resourceId) {
-  // 这里只负责“把刮削结果回填到剧集列表里”，不负责触发刮削。
-  // 典型调用顺序：
-  //   detail -> processScraping(...) -> getScrapeMetadata(...) -> enrichPlaySourcesWithMetadata(...)
-  //
-  // 注意：即使这里成功拿到了 metadata，页面上也不一定会“看起来变化很大”。
-  // 因为前端主要展示 vod_name / vod_pic / 简介 / 剧集名称等字段；
-  // 如果站点原始数据已经比较完整，或者前端没有展示 enrich 字段，就会产生“刮削似乎没生效”的错觉。
-  // 所以这里额外加详细日志，帮助判断到底是：
-  // - processScraping 没跑到
-  // - getScrapeMetadata 没拿到数据
-  // - videoMappings 没匹配上 fileId
-  // - 还是拿到了但前端展示不明显
   try {
-    await OmniBox.log("info", `[刮削回填] 开始读取元数据 resourceId=${resourceId}`);
     const metadata = await OmniBox.getScrapeMetadata(resourceId);
     const scrapeData = metadata?.scrapeData || null;
     const videoMappings = Array.isArray(metadata?.videoMappings) ? metadata.videoMappings : [];
 
-    await OmniBox.log(
-      "info",
-      `[刮削回填] 元数据读取完成 resourceId=${resourceId}, hasScrapeData=${!!scrapeData}, mappingCount=${videoMappings.length}, playSourceCount=${playSources.length}`
-    );
-
-    if (scrapeData) {
-      await OmniBox.log(
-        "info",
-        `[刮削回填] scrapeData 摘要 title=${text(scrapeData.title)}, releaseDate=${text(scrapeData.releaseDate)}, voteAverage=${text(scrapeData.voteAverage)}`
-      );
-    }
-
     if (!playSources.length || !videoMappings.length) {
-      await OmniBox.log(
-        "warn",
-        `[刮削回填] 没有可回填的数据 playSources=${playSources.length}, videoMappings=${videoMappings.length}`
-      );
       return { playSources, scrapeData, metadata };
     }
 
@@ -345,26 +367,17 @@ async function enrichPlaySourcesWithMetadata(playSources, resourceId) {
       if (m?.fileId) mappingMap.set(String(m.fileId), m);
     }
 
-    let matchedCount = 0;
-
     for (const source of playSources) {
       for (const ep of source.episodes || []) {
         const lookupKey = String(ep._fileId || "");
         const mapping = mappingMap.get(lookupKey);
-        if (!mapping) {
-          await OmniBox.log("info", `[刮削回填] 未命中映射 source=${source.name}, episode=${ep.name}, fileId=${lookupKey}`);
-          continue;
-        }
+        if (!mapping) continue;
 
-        matchedCount += 1;
-        await OmniBox.log(
-          "info",
-          `[刮削回填] 命中映射 source=${source.name}, oldEpisode=${ep.name}, fileId=${lookupKey}, season=${mapping.seasonNumber ?? ""}, episode=${mapping.episodeNumber ?? ""}, tmdbEpisodeName=${text(mapping.episodeName)}`
-        );
-
+        // 修复：不再强制覆盖 ep.name 导致前端变成 "1.第1集"
         if (mapping.episodeName) {
-          const epName = mapping.episodeNumber + "." + mapping.episodeName;
-          ep.episodeName = epName;
+          ep.episodeName = mapping.episodeName;
+          // 如果你想美化前端显示的集数名字，打开下面这行：
+          // ep.name = `第${String(mapping.episodeNumber).padStart(2, '0')}集`;
         }
         if (mapping.episodeOverview) ep.episodeOverview = mapping.episodeOverview;
         if (mapping.episodeAirDate) ep.episodeAirDate = mapping.episodeAirDate;
@@ -373,15 +386,10 @@ async function enrichPlaySourcesWithMetadata(playSources, resourceId) {
         if (mapping.episodeRuntime != null) ep.episodeRuntime = mapping.episodeRuntime;
         if (mapping.seasonNumber != null) ep._seasonNumber = mapping.seasonNumber;
         if (mapping.episodeNumber != null) ep._episodeNumber = mapping.episodeNumber;
-        if (mapping.episodeName) {
-          const epName = mapping.episodeNumber + "." + mapping.episodeName;
-          ep.name = epName;
-        }
       }
 
       const hasOrdering = (source.episodes || []).some((ep) => ep._episodeNumber != null);
       if (hasOrdering) {
-        await OmniBox.log("info", `[刮削回填] 线路 ${source.name} 检测到剧集排序信息，按 season/episode 重排`);
         source.episodes.sort((a, b) => {
           const sa = Number(a._seasonNumber || 0);
           const sb = Number(b._seasonNumber || 0);
@@ -397,7 +405,6 @@ async function enrichPlaySourcesWithMetadata(playSources, resourceId) {
       }
     }
 
-    await OmniBox.log("info", `[刮削回填] 完成 resourceId=${resourceId}, matchedEpisodeCount=${matchedCount}`);
     return { playSources, scrapeData, metadata };
   } catch (error) {
     await OmniBox.log("warn", `获取刮削元数据失败: ${error.message}`);
@@ -441,14 +448,13 @@ async function fetchMainAllByChildren(mainTypeId, page) {
   const childTypeIds = getChildTypeIds(mainTypeId);
   if (!childTypeIds.length) {
     const direct = await fetchApi({ ac: "list", t: text(mainTypeId), pg: page });
-    const directList = (Array.isArray(direct.list) ? direct.list : [])
-      .map(mapListItem)
-      .filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
+    const rawList = (Array.isArray(direct.list) ? direct.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
+    const list = await processListAsync(rawList);
     return {
-      list: directList,
+      list,
       page: Number(direct.page || page || 1),
       pagecount: Number(direct.pagecount || page || 1),
-      total: Number(direct.total || directList.length || 0),
+      total: Number(direct.total || list.length || 0),
       limit: Number(direct.limit || 20)
     };
   }
@@ -468,17 +474,16 @@ async function fetchMainAllByChildren(mainTypeId, page) {
   });
 
   const seen = new Set();
-  const merged = mergedRaw
-    .map(mapListItem)
-    .filter((it) => !isMainBlocked(it.main_type_id || it.type_id))
-    .filter((it) => {
-      if (!it.vod_id || seen.has(it.vod_id)) return false;
-      seen.add(it.vod_id);
-      return true;
-    })
-    .sort((a, b) => Number(b.vod_id || 0) - Number(a.vod_id || 0));
+  const uniqueRaw = mergedRaw.filter((it) => {
+    if (!it.vod_id || seen.has(it.vod_id)) return false;
+    seen.add(it.vod_id);
+    return true;
+  });
 
-  return { list: merged, page, pagecount: pagecount || page, total: total || merged.length, limit };
+  const list = await processListAsync(uniqueRaw);
+  list.sort((a, b) => Number(b.vod_id || 0) - Number(a.vod_id || 0));
+
+  return { list, page, pagecount: pagecount || page, total: total || list.length, limit };
 }
 
 function getFilterSubtype(params) {
@@ -496,8 +501,6 @@ function inferTypeName(mainTypeId, rawTypeName) {
 }
 
 function buildScrapeKeyword(item) {
-  // 只传片名，不加年份；加年份容易干扰 TMDB 搜索（如"你好1983 2026"）
-  // 参考瓜子.js: processScraping(videoId, vod.vod_name, vod.vod_name, ...)
   return text(item.vod_name);
 }
 
@@ -520,7 +523,10 @@ function buildDanmakuFileName(scrapeData, mapping, fallbackTitle, fallbackEpName
 async function home(params, context) {
   const data = await fetchApi({ ac: "list", pg: 1 });
   const classes = buildMainClasses();
-  const list = (Array.isArray(data.list) ? data.list : []).map(mapListItem).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
+  
+  const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
+  const list = await processListAsync(rawList);
+
   const filters = {};
   classes.forEach((m) => {
     const f = buildFiltersForMain(m.type_id);
@@ -542,7 +548,9 @@ async function category(params, context) {
   let result;
   if (!isAllSelection(subtype)) {
     const data = await fetchApi({ ac: "list", t: subtype, pg: page });
-    const list = (Array.isArray(data.list) ? data.list : []).map(mapListItem).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
+    const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
+    const list = await processListAsync(rawList);
+    
     result = {
       list,
       page: Number(data.page || page || 1),
@@ -565,7 +573,9 @@ async function search(params, context) {
   if (!keyword) return { list: [], page: 1, pagecount: 0, total: 0 };
 
   const data = await fetchApi({ ac: "list", wd: keyword, pg: page });
-  const list = (Array.isArray(data.list) ? data.list : []).map(mapListItem).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
+  const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
+  const list = await processListAsync(rawList);
+
   return {
     list,
     page: Number(data.page || page || 1),
@@ -580,60 +590,38 @@ async function detail(params, context) {
     const videoId = text(params?.videoId || "");
     if (!videoId) return { list: [] };
 
-    await OmniBox.log("info", `[detail] 开始处理 videoId=${videoId}`);
     const data = await fetchApi({ ac: "detail", ids: videoId });
     const item = Array.isArray(data.list) && data.list.length ? data.list[0] : null;
-    if (!item) {
-      await OmniBox.log("warn", `[detail] 未获取到详情数据 videoId=${videoId}`);
-      return { list: [] };
-    }
+    if (!item) return { list: [] };
 
     const mainTypeId = resolveMainTypeId(item.type_id, item.type_id_1 || "");
-    if (isMainBlocked(mainTypeId)) {
-      await OmniBox.log("warn", `[detail] 命中屏蔽主类 mainTypeId=${mainTypeId}, videoId=${videoId}`);
-      return { list: [] };
-    }
+    if (isMainBlocked(mainTypeId)) return { list: [] };
 
     const resourceId = buildResourceId(videoId);
     const { sources, videoFiles } = parsePlaySources(item.vod_play_from, item.vod_play_url, videoId, item.vod_name);
 
-    await OmniBox.log(
-      "info",
-      `[detail] 播放数据已解析 videoId=${videoId}, resourceId=${resourceId}, sourceCount=${sources.length}, videoFileCount=${videoFiles.length}, vodName=${text(item.vod_name)}`
-    );
-
     let scrapeData = null;
     if (videoFiles.length > 0) {
       const scrapeKeyword = buildScrapeKeyword(item);
-      await OmniBox.log(
-        "info",
-        `[detail] 准备执行刮削 resourceId=${resourceId}, keyword=${scrapeKeyword}, resourceName=${text(item.vod_name)}, firstFile=${text(videoFiles[0]?.file_name)}`
-      );
       try {
-        // processScraping 在采集源中是同步阻塞的，等刮削完成后才返回
-        // 调用完成后可立即读取元数据，不需要轮询
-        const scrapingResult = await OmniBox.processScraping(resourceId, scrapeKeyword, text(item.vod_name), videoFiles);
-        await OmniBox.log("info", `[detail] processScraping 调用完成 resourceId=${resourceId}, result=${JSON.stringify(scrapingResult || {}).substring(0, 300)}`);
+        await OmniBox.processScraping(resourceId, scrapeKeyword, text(item.vod_name), videoFiles);
       } catch (error) {
         await OmniBox.log("warn", `[detail] processScraping 失败 resourceId=${resourceId}, error=${error.message}`);
       }
-    } else {
-      await OmniBox.log("warn", `[detail] 未解析出任何 videoFiles，跳过刮削 resourceId=${resourceId}`);
     }
 
     const enriched = await enrichPlaySourcesWithMetadata(sources, resourceId);
     const playSources = enriched.playSources;
     scrapeData = enriched.scrapeData;
 
-    await OmniBox.log(
-      "info",
-      `[detail] 刮削回填结束 resourceId=${resourceId}, hasScrapeData=${!!scrapeData}, finalSourceCount=${playSources.length}, totalEpisodeCount=${playSources.reduce((n, s) => n + ((s.episodes || []).length), 0)}`
-    );
+    // 兼容多种 TMDB 字段
+    const posterPath = scrapeData?.posterPath || scrapeData?.poster_path || scrapeData?.poster;
 
     const vod = {
       vod_id: text(item.vod_id),
       vod_name: text(scrapeData?.title || item.vod_name),
-      vod_pic: scrapeData?.posterPath ? `https://image.tmdb.org/t/p/w500${scrapeData.posterPath}` : fixUrl(item.vod_pic),
+      // 详情页海报直接走后端解析，不经过代理也能显示，但统一用原图逻辑
+      vod_pic: posterPath ? `https://image.tmdb.org/t/p/w500${posterPath}` : fixUrl(item.vod_pic),
       vod_remarks: text(item.vod_remarks),
       vod_year: text((scrapeData?.releaseDate || item.vod_year || "").slice?.(0, 4) || item.vod_year || ""),
       vod_area: text(item.vod_area),
@@ -645,11 +633,6 @@ async function detail(params, context) {
       vod_play_sources: playSources,
       vod_douban_score: text(scrapeData?.voteAverage != null ? Number(scrapeData.voteAverage).toFixed(1) : (item.vod_douban_score || ""))
     };
-
-    await OmniBox.log(
-      "info",
-      `[detail] 最终返回 videoId=${videoId}, vodName=${vod.vod_name}, vodYear=${vod.vod_year}, vodScore=${vod.vod_douban_score}, hasPoster=${!!vod.vod_pic}, hasContent=${!!vod.vod_content}`
-    );
 
     return { list: [vod] };
   } catch (error) {
@@ -669,20 +652,11 @@ async function play(params, context) {
     const title = text(meta.name || params?.title || "");
     const epName = text(meta.epName || "");
 
-    await OmniBox.log(
-      "info",
-      `[play] 开始处理 vodId=${vodId}, resourceId=${resourceId}, fileId=${fileId}, title=${title}, epName=${epName}, hasUrl=${!!url}`
-    );
-
     if (!url) {
-      await OmniBox.log("warn", `[play] playId 无法解出有效 URL, playId=${playId.slice(0, 120)}`);
       return {
         urls: [],
         parse: 1,
-        header: {
-          "User-Agent": UA,
-          "Referer": `${HOST}/`
-        },
+        header: { "User-Agent": UA, "Referer": `${HOST}/` },
         danmaku: []
       };
     }
@@ -693,38 +667,22 @@ async function play(params, context) {
 
     if (resourceId && fileId) {
       try {
-        await OmniBox.log("info", `[play] 开始读取刮削元数据 resourceId=${resourceId}, fileId=${fileId}`);
         const metadata = await OmniBox.getScrapeMetadata(resourceId);
         scrapeData = metadata?.scrapeData || null;
         const mappings = Array.isArray(metadata?.videoMappings) ? metadata.videoMappings : [];
         mapping = mappings.find((m) => String(m?.fileId || "") === fileId) || null;
 
-        await OmniBox.log(
-          "info",
-          `[play] 元数据读取完成 resourceId=${resourceId}, hasScrapeData=${!!scrapeData}, mappingCount=${mappings.length}, mappingMatched=${!!mapping}`
-        );
-
         const fileName = buildDanmakuFileName(scrapeData, mapping, title, epName);
-        await OmniBox.log("info", `[play] 构造弹幕匹配文件名 fileName=${fileName}`);
-
         if (fileName) {
           danmaku = await OmniBox.getDanmakuByFileName(fileName);
-          await OmniBox.log("info", `[play] 弹幕匹配完成 fileName=${fileName}, danmakuCount=${Array.isArray(danmaku) ? danmaku.length : 0}`);
         }
       } catch (error) {
         await OmniBox.log("warn", `[play] 弹幕匹配失败: ${error.message}`);
       }
-    } else {
-      await OmniBox.log("warn", `[play] 缺少 resourceId 或 fileId，跳过弹幕匹配 resourceId=${resourceId}, fileId=${fileId}`);
     }
 
     const parse = /\.(m3u8|mp4|flv|webm)(\?|$)/i.test(url) ? 0 : 1;
-    const header = {
-      "User-Agent": UA,
-      "Referer": `${HOST}/`
-    };
-
-    await OmniBox.log("info", `[play] 播放地址已确定 parse=${parse}, url=${url.slice(0, 200)}`);
+    const header = { "User-Agent": UA, "Referer": `${HOST}/` };
 
     try {
       const historyPayload = {
@@ -737,9 +695,7 @@ async function play(params, context) {
         playUrl: url,
         playHeader: header
       };
-      await OmniBox.log("info", `[play] 准备写入观看记录 vodId=${historyPayload.vodId}, episodeName=${historyPayload.episodeName || ""}, episodeNumber=${historyPayload.episodeNumber ?? ""}`);
       await OmniBox.addPlayHistory(historyPayload);
-      await OmniBox.log("info", `[play] 观看记录写入完成 vodId=${historyPayload.vodId}`);
     } catch (error) {
       await OmniBox.log("warn", `[play] 添加观看记录失败: ${error.message}`);
     }
@@ -755,10 +711,7 @@ async function play(params, context) {
     return {
       urls: [],
       parse: 1,
-      header: {
-        "User-Agent": UA,
-        "Referer": `${HOST}/`
-      },
+      header: { "User-Agent": UA, "Referer": `${HOST}/` },
       danmaku: []
     };
   }

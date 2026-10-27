@@ -2,7 +2,7 @@
 // @author OpenClaw Bingbu + 梦
 // @description 刮削：支持，弹幕：支持，嗅探：支持，观看记录：支持，广告：菠菜
 // @dependencies: axios
-// @version 1.1.5
+// @version 1.1.6
 // @downloadURL https://gh-proxy.org/https://github.com/lansepyy/OmniBox-Spider/raw/refs/heads/main/影视/采集/芒果tv.js
 
 /**
@@ -11,10 +11,9 @@
  * 站点: https://caiji.mgzyapi.com
  *
  * 更新日志：
- * - v1.1.5: 主分类固定为 电影/电视剧/动漫，分类 ID 全部动态解析，
- *           修复电影/电视剧因写死 ID 失效导致无数据的问题。
- * - v1.1.4: 主分类固定为 电影/电视剧/动漫，子分类继续动态解析源站分类树。
- * - v1.1.3: 修复分类不准确（电影里混入剧集），动态重构父子分类映射。
+ * - v1.1.6: 修复首页响应解析失败；主分类固定为 电影/电视剧/动漫，
+ *           支持多级子分类递归解析，修复电影/电视剧无数据问题。
+ * - v1.1.5: 主分类固定为 电影/电视剧/动漫，分类 ID 全部动态解析。
  * ============================================================================
  */
 
@@ -26,7 +25,7 @@ const HOST = "https://caiji.mgzyapi.com";
 const API = `${HOST}/api.php/provide/vod`;
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
 
-// 仅作为缓存完全不可用时的最终兜底展示，不作为查询 ID 使用
+// 仅作为分类缓存完全不可用时的最终兜底展示
 const MAIN_CATEGORIES = [
   { type_id: "7", type_name: "电影" },
   { type_id: "8", type_name: "电视剧" },
@@ -63,6 +62,13 @@ function safeJson(input, fallback = {}) {
 
 function text(v) {
   return String(v == null ? "" : v).trim();
+}
+
+function safeLog(level, message) {
+  try {
+    const r = OmniBox.log(level, message);
+    if (r && typeof r.catch === "function") r.catch(() => {});
+  } catch (e) {}
 }
 
 function fixUrl(url) {
@@ -129,7 +135,7 @@ async function fetchApi(params = {}) {
     if (Array.isArray(data.class)) updateClassCache(data.class);
     return data;
   } catch (error) {
-    await OmniBox.log("warn", `fetchApi 失败: ${error.message}`);
+    safeLog("warn", `fetchApi 失败: ${error.message}`);
     return {};
   }
 }
@@ -162,9 +168,6 @@ function inferMainTypeIdFromChildren(targetName) {
   const re = childKeywords[targetName];
   if (!re) return "";
 
-  const topLevel = CLASS_CACHE.list.filter((c) => !c.type_pid || c.type_pid === "0" || c.type_pid === c.type_id);
-  if (!topLevel.length) return "";
-
   const candidates = CLASS_CACHE.list.filter((c) => re.test(text(c.type_name)));
   for (const c of candidates) {
     let cur = c;
@@ -193,7 +196,7 @@ function getMainTypeName(typeId) {
   return fallback ? fallback.type_name : "";
 }
 
-// 核心修复 1：动态解析父类ID
+// 动态解析某个子分类所属的主分类 ID
 function resolveMainTypeId(typeId, fallbackMain = "") {
   const t = text(typeId);
   if (!t) return text(fallbackMain);
@@ -207,7 +210,6 @@ function resolveMainTypeId(typeId, fallbackMain = "") {
     if (!cur.type_pid || cur.type_pid === "0" || cur.type_pid === cur.type_id) {
       return cur.type_id;
     }
-    // 如果已经是主分类，直接返回
     if (MAIN_CATEGORIES.some((m) => m.type_id === cur.type_id)) {
       return cur.type_id;
     }
@@ -222,7 +224,7 @@ function isMainBlocked(mainTypeId) {
   return getBlockedMainSet().has(text(mainTypeId));
 }
 
-// 核心修复 2：识别并剔除混入电影的剧集
+// 识别混入电影的剧集名称
 function isTvShowName(vodName, typeName) {
   const name = text(vodName);
   const tname = text(typeName);
@@ -243,7 +245,7 @@ function isTvShowName(vodName, typeName) {
 }
 
 // 获取主分类列表：固定为 电影 / 电视剧 / 动漫，ID 从源站动态解析
-async function buildMainClasses() {
+function buildMainClasses() {
   const desired = [
     { name: "电影", id: "7" },
     { name: "电视剧", id: "8" },
@@ -251,9 +253,10 @@ async function buildMainClasses() {
   ];
 
   const result = [];
-  const topLevel = CLASS_CACHE.list.filter((c) => !c.type_pid || c.type_pid === "0" || c.type_pid === c.type_id);
+  const topLevel = CLASS_CACHE.list.filter(
+    (c) => !c.type_pid || c.type_pid === "0" || c.type_pid === c.type_id
+  );
 
-  // 如果源站缓存可用，优先动态解析
   if (topLevel.length > 0) {
     for (const d of desired) {
       // 1. 顶级分类名称直接匹配
@@ -268,20 +271,50 @@ async function buildMainClasses() {
         }
       }
 
-      if (hit) {
-        result.push({ type_id: hit.type_id, type_name: d.name });
-      }
+      if (hit) result.push({ type_id: hit.type_id, type_name: d.name });
     }
 
-    if (result.length > 0) {
-      await OmniBox.log("info", `[buildMainClasses] 动态解析主分类: ${JSON.stringify(result)}`);
-      return result;
+    if (result.length > 0) return result;
+  }
+
+  // 源站缓存不可用或解析失败时，才使用写死的兜底 ID
+  return desired.map((d) => ({ type_id: d.id, type_name: d.name }));
+}
+
+// 获取某个分类的直接子分类 ID
+function getDirectChildTypeIds(mainTypeId) {
+  const key = text(mainTypeId);
+  const children = (CLASS_CACHE.childMap?.[key] || [])
+    .filter((c) => c.type_id && c.type_id !== key)
+    .map((c) => c.type_id);
+
+  if (children.length) return children;
+
+  // childMap 没构建出来时，按 type_pid 过滤兜底
+  return CLASS_CACHE.list
+    .filter((c) => text(c.type_pid) === key && c.type_id !== key)
+    .map((c) => c.type_id);
+}
+
+// 递归获取所有末级分类 ID（支持多级分类）
+function getAllDescendantTypeIds(mainTypeId) {
+  const key = text(mainTypeId);
+  const leaves = [];
+  const visited = new Set();
+
+  function walk(pid) {
+    const children = getDirectChildTypeIds(pid);
+    for (const cid of children) {
+      if (visited.has(cid)) continue;
+      visited.add(cid);
+      const grand = getDirectChildTypeIds(cid);
+      if (grand.length > 0) walk(cid);
+      else leaves.push(cid);
     }
   }
 
-  // 源站缓存不可用或完全解析失败时，才使用写死的兜底 ID
-  await OmniBox.log("warn", "[buildMainClasses] 动态解析失败，使用写死的兜底分类 ID");
-  return desired.map((d) => ({ type_id: d.id, type_name: d.name }));
+  walk(key);
+  return leaves;
 }
 
 function buildFiltersForMain(mainTypeId) {
@@ -298,20 +331,6 @@ function buildFiltersForMain(mainTypeId) {
     init: "",
     value: [{ name: "全部", value: "" }, ...children.map((c) => ({ name: c.type_name, value: c.type_id }))]
   }];
-}
-
-function getChildTypeIds(mainTypeId) {
-  const key = text(mainTypeId);
-  const children = (CLASS_CACHE.childMap?.[key] || [])
-    .filter((c) => c.type_id && c.type_id !== key)
-    .map((c) => c.type_id);
-
-  if (children.length) return children;
-
-  // 兜底：如果 childMap 没构建出来，直接按 type_pid 过滤
-  return CLASS_CACHE.list
-    .filter((c) => text(c.type_pid) === key && c.type_id !== key)
-    .map((c) => c.type_id);
 }
 
 async function enrichVideosWithDetails(rawList, mainTypeId = "") {
@@ -334,12 +353,10 @@ async function enrichVideosWithDetails(rawList, mainTypeId = "") {
     };
   });
 
-  // 【核心过滤】电影主分类下，干掉明显的剧集
+  // 电影主分类下，干掉明显的剧集
   const isMovieContext = getMainTypeName(mainTypeId) === "电影";
   const filteredVideos = videos.filter((v) => {
-    if (isMovieContext && isTvShowName(v.vod_name, v.type_name)) {
-      return false;
-    }
+    if (isMovieContext && isTvShowName(v.vod_name, v.type_name)) return false;
     return true;
   });
 
@@ -516,20 +533,23 @@ function buildDanmakuFileName(scrapeData, mapping, fallbackTitle, fallbackEpName
   return title || `${fallbackTitle || ""} ${fallbackEpName || ""}`.trim();
 }
 
-// 核心修复 3：优先聚合子分类，空数据时降级为直查父分类
-async function fetchMainAllByChildren(mainTypeId, page) {
-  const childTypeIds = getChildTypeIds(mainTypeId);
+// 直查某个分类 ID
+async function fetchDirectByType(typeId, mainTypeId, page) {
+  const data = await fetchApi({ ac: "list", t: text(typeId), pg: page });
+  const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
+  const list = await enrichVideosWithDetails(rawList, mainTypeId);
+  return {
+    list,
+    page: Number(data.page || page || 1),
+    pagecount: Number(data.pagecount || page || 1),
+    total: Number(data.total || list.length || 0),
+    limit: Number(data.limit || 20)
+  };
+}
 
-  // 没有子分类，直接查询父分类
-  if (!childTypeIds.length) {
-    const direct = await fetchApi({ ac: "list", t: text(mainTypeId), pg: page });
-    const rawList = (Array.isArray(direct.list) ? direct.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
-    const list = await enrichVideosWithDetails(rawList, mainTypeId);
-    return { list, page: Number(direct.page || page || 1), pagecount: Number(direct.pagecount || page || 1), total: Number(direct.total || list.length || 0), limit: Number(direct.limit || 20) };
-  }
-
-  // 并发请求所有子分类
-  const results = await Promise.all(childTypeIds.map((tid) => fetchApi({ ac: "list", t: tid, pg: page })));
+// 聚合多个分类 ID 的数据
+async function aggregateByTypeIds(typeIds, mainTypeId, page) {
+  const results = await Promise.all(typeIds.map((tid) => fetchApi({ ac: "list", t: tid, pg: page })));
   const mergedRaw = [];
   let total = 0, pagecount = 0, limit = 20;
 
@@ -548,72 +568,119 @@ async function fetchMainAllByChildren(mainTypeId, page) {
     return true;
   });
 
-  let list = await enrichVideosWithDetails(uniqueRaw, mainTypeId);
-
-  // 子分类聚合为空时，降级直查父分类，避免空数据
-  if (list.length === 0) {
-    await OmniBox.log("warn", `[fetchMainAllByChildren] 主分类 ${mainTypeId} 子分类聚合为空，降级为直查父分类`);
-    const direct = await fetchApi({ ac: "list", t: text(mainTypeId), pg: page });
-    const rawList = (Array.isArray(direct.list) ? direct.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
-    list = await enrichVideosWithDetails(rawList, mainTypeId);
-    return { list, page, pagecount: Number(direct.pagecount || page || 1), total: Number(direct.total || list.length || 0), limit: Number(direct.limit || 20) };
-  }
-
+  const list = await enrichVideosWithDetails(uniqueRaw, mainTypeId);
   list.sort((a, b) => Number(b.vod_id || 0) - Number(a.vod_id || 0));
   return { list, page, pagecount: pagecount || page, total: total || list.length, limit };
 }
 
-async function home(params, context) {
-  await ensureClassCache(); // 必须先拉取分类缓存
-  const data = await fetchApi({ ac: "list", pg: 1 });
-  const classes = await buildMainClasses();
+// 查询某个分类：如果它有下级分类，优先递归聚合；否则直查
+async function fetchByTypeOrDescendants(typeId, mainTypeId, page) {
+  const leaves = getAllDescendantTypeIds(typeId);
 
-  const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
-  const list = await enrichVideosWithDetails(rawList, "");
-
-  const filters = {};
-  classes.forEach((m) => {
-    const f = buildFiltersForMain(m.type_id);
-    if (f.length) filters[m.type_id] = f;
-  });
-  return { class: classes, filters, list };
-}
-
-async function category(params, context) {
-  const page = parseInt(params?.page || "1", 10) || 1;
-  const mainTypeId = text(params?.categoryId || params?.type_id || "");
-  const subtype = getFilterSubtype(params);
-  await ensureClassCache();
-
-  if (isMainBlocked(mainTypeId)) return { list: [], page, pagecount: 0, total: 0, limit: 20 };
-
-  let result;
-  if (!isAllSelection(subtype)) {
-    // 指定了子分类，直接查询该子分类
-    const data = await fetchApi({ ac: "list", t: subtype, pg: page });
-    const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
-    const list = await enrichVideosWithDetails(rawList, mainTypeId);
-    result = { list, page: Number(data.page || page || 1), pagecount: Number(data.pagecount || page || 1), total: Number(data.total || list.length || 0), limit: Number(data.limit || 20) };
-  } else {
-    // 选择了“全部”，触发聚合
-    result = await fetchMainAllByChildren(mainTypeId, page);
+  if (leaves.length > 0) {
+    const aggregated = await aggregateByTypeIds(leaves, mainTypeId, page);
+    if (aggregated.list.length > 0) return aggregated;
   }
 
-  const f = buildFiltersForMain(mainTypeId);
-  if (f.length && page === 1) result.filters = f;
+  return await fetchDirectByType(typeId, mainTypeId, page);
+}
+
+// 主分类“全部”加载
+async function fetchMainAllByChildren(mainTypeId, page) {
+  const directChildren = getDirectChildTypeIds(mainTypeId);
+  const leaves = getAllDescendantTypeIds(mainTypeId);
+
+  if (directChildren.length === 0) {
+    return await fetchDirectByType(mainTypeId, mainTypeId, page);
+  }
+
+  const queryIds = leaves.length > 0 ? leaves : directChildren;
+  let result = await aggregateByTypeIds(queryIds, mainTypeId, page);
+
+  // 末级聚合为空时，尝试直接子分类
+  if (result.list.length === 0 && leaves.length > 0 && directChildren.some((id) => !leaves.includes(id))) {
+    result = await aggregateByTypeIds(directChildren, mainTypeId, page);
+  }
+
+  // 仍然为空，直查父分类兜底
+  if (result.list.length === 0) {
+    return await fetchDirectByType(mainTypeId, mainTypeId, page);
+  }
+
   return result;
 }
 
+async function home(params, context) {
+  try {
+    await ensureClassCache(); // 必须先拉取分类缓存
+    const data = await fetchApi({ ac: "list", pg: 1 });
+    const classes = buildMainClasses();
+
+    // 首页的“全部”标签，不需要过度过滤
+    const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
+    const list = await enrichVideosWithDetails(rawList, "");
+
+    const filters = {};
+    classes.forEach((m) => {
+      const f = buildFiltersForMain(m.type_id);
+      if (f.length) filters[m.type_id] = f;
+    });
+
+    return { class: classes, filters, list };
+  } catch (error) {
+    safeLog("error", `home 失败: ${error.message}`);
+    return { class: [], filters: {}, list: [] };
+  }
+}
+
+async function category(params, context) {
+  try {
+    const page = parseInt(params?.page || "1", 10) || 1;
+    const mainTypeId = text(params?.categoryId || params?.type_id || "");
+    const subtype = getFilterSubtype(params);
+    await ensureClassCache();
+
+    if (isMainBlocked(mainTypeId)) return { list: [], page, pagecount: 0, total: 0, limit: 20 };
+
+    let result;
+    if (!isAllSelection(subtype)) {
+      // 指定了子分类：如果子分类还有下级，递归展开
+      result = await fetchByTypeOrDescendants(subtype, mainTypeId, page);
+    } else {
+      // 选择了“全部”，触发聚合
+      result = await fetchMainAllByChildren(mainTypeId, page);
+    }
+
+    const f = buildFiltersForMain(mainTypeId);
+    if (f.length && page === 1) result.filters = f;
+    return result;
+  } catch (error) {
+    safeLog("error", `category 失败: ${error.message}`);
+    return { list: [], page: parseInt(params?.page || "1", 10) || 1, pagecount: 0, total: 0, limit: 20 };
+  }
+}
+
 async function search(params, context) {
-  const keyword = text(params?.keyword || params?.wd || "");
-  const page = parseInt(params?.page || "1", 10) || 1;
-  if (!keyword) return { list: [], page: 1, pagecount: 0, total: 0 };
+  try {
+    const keyword = text(params?.keyword || params?.wd || "");
+    const page = parseInt(params?.page || "1", 10) || 1;
+    if (!keyword) return { list: [], page: 1, pagecount: 0, total: 0 };
 
-  const data = await fetchApi({ ac: "list", wd: keyword, pg: page });
-  const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
-  const list = await enrichVideosWithDetails(rawList, "");
+    const data = await fetchApi({ ac: "list", wd: keyword, pg: page });
+    const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
+    const list = await enrichVideosWithDetails(rawList, "");
 
-  return { list, page: Number(data.page || page || 1), pagecount: Number(data.pagecount || page || 1), total: Number(data.total || list.length || 0), limit: Number(data.limit || 20) };
+    return {
+      list,
+      page: Number(data.page || page || 1),
+      pagecount: Number(data.pagecount || page || 1),
+      total: Number(data.total || list.length || 0),
+      limit: Number(data.limit || 20)
+    };
+  } catch (error) {
+    safeLog("error", `search 失败: ${error.message}`);
+    return { list: [], page: parseInt(params?.page || "1", 10) || 1, pagecount: 0, total: 0 };
+  }
 }
 
 async function detail(params, context) {
@@ -636,7 +703,7 @@ async function detail(params, context) {
       try {
         await OmniBox.processScraping(resourceId, buildScrapeKeyword(item), text(item.vod_name), videoFiles);
       } catch (error) {
-        await OmniBox.log("warn", `[detail] processScraping 失败: ${error.message}`);
+        safeLog("warn", `[detail] processScraping 失败: ${error.message}`);
       }
     }
 
@@ -666,7 +733,7 @@ async function detail(params, context) {
 
     return { list: [vod] };
   } catch (error) {
-    await OmniBox.log("error", `detail 失败: ${error.message}`);
+    safeLog("error", `detail 失败: ${error.message}`);
     return { list: [] };
   }
 }
@@ -702,7 +769,7 @@ async function play(params, context) {
           danmaku = await OmniBox.getDanmakuByFileName(fileName);
         }
       } catch (error) {
-        await OmniBox.log("warn", `[play] 弹幕匹配失败: ${error.message}`);
+        safeLog("warn", `[play] 弹幕匹配失败: ${error.message}`);
       }
     }
 
@@ -722,12 +789,12 @@ async function play(params, context) {
       };
       await OmniBox.addPlayHistory(historyPayload);
     } catch (error) {
-      await OmniBox.log("warn", `[play] 添加观看记录失败: ${error.message}`);
+      safeLog("warn", `[play] 添加观看记录失败: ${error.message}`);
     }
 
     return { urls: [{ name: epName || meta.flag || "播放", url }], parse, header, danmaku: Array.isArray(danmaku) ? danmaku : [] };
   } catch (error) {
-    await OmniBox.log("error", `play 失败: ${error.message}`);
+    safeLog("error", `play 失败: ${error.message}`);
     return { urls: [], parse: 1, header: { "User-Agent": UA, "Referer": `${HOST}/` }, danmaku: [] };
   }
 }

@@ -2,8 +2,8 @@
 // @author OpenClaw Bingbu + 梦
 // @description 刮削：支持，弹幕：支持，嗅探：支持，观看记录：支持，广告：菠菜
 // @dependencies: axios
-// @version 1.1.4
-// @downloadURL https://gh-proxy.org/https://github.com/lansepyy/OmniBox-Spider/raw/refs/heads/main/影视/采集/爱芒果tv.js
+// @version 1.1.5
+// @downloadURL https://gh-proxy.org/https://github.com/lansepyy/OmniBox-Spider/raw/refs/heads/main/影视/采集/芒果tv.js
 
 /**
  * ============================================================================
@@ -11,6 +11,8 @@
  * 站点: https://caiji.mgzyapi.com
  *
  * 更新日志：
+ * - v1.1.5: 主分类固定为 电影/电视剧/动漫，分类 ID 全部动态解析，
+ *           修复电影/电视剧因写死 ID 失效导致无数据的问题。
  * - v1.1.4: 主分类固定为 电影/电视剧/动漫，子分类继续动态解析源站分类树。
  * - v1.1.3: 修复分类不准确（电影里混入剧集），动态重构父子分类映射。
  * ============================================================================
@@ -24,22 +26,12 @@ const HOST = "https://caiji.mgzyapi.com";
 const API = `${HOST}/api.php/provide/vod`;
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
 
-// 主分类固定为这三个；type_id 仅作兜底，实际会优先使用源站动态解析出的顶级分类 ID
+// 仅作为缓存完全不可用时的最终兜底展示，不作为查询 ID 使用
 const MAIN_CATEGORIES = [
   { type_id: "7", type_name: "电影" },
   { type_id: "8", type_name: "电视剧" },
   { type_id: "40", type_name: "动漫" }
 ];
-
-// 源站分类名 -> 前端主分类名 的归一化映射
-const MAIN_TYPE_ALIASES = {
-  "电影": "电影",
-  "电视剧": "电视剧",
-  "连续剧": "电视剧",
-  "动漫": "动漫",
-  "动画": "动漫",
-  "动画片": "动漫"
-};
 
 const DEFAULT_BLOCKED_MAIN = ["39"];
 
@@ -71,10 +63,6 @@ function safeJson(input, fallback = {}) {
 
 function text(v) {
   return String(v == null ? "" : v).trim();
-}
-
-function normalizeMainTypeName(name) {
-  return MAIN_TYPE_ALIASES[text(name)] || "";
 }
 
 function fixUrl(url) {
@@ -122,7 +110,6 @@ function updateClassCache(classList) {
   const mapById = {};
   const childMap = {};
 
-  // 动态构建分类树
   classes.forEach((c) => {
     mapById[c.type_id] = c;
     const pid = c.type_pid || "0";
@@ -152,32 +139,44 @@ async function ensureClassCache() {
   await fetchApi({ ac: "list", pg: 1 });
 }
 
-// 核心修复 1：动态解析父类ID
-function resolveMainTypeId(typeId, fallbackMain = "") {
-  const t = text(typeId);
-  if (!t) return text(fallbackMain);
+// 根据分类名识别主分类
+function classifyMainTypeName(typeName) {
+  const n = text(typeName);
+  if (!n) return "";
 
-  // 优先从动态缓存中找它的父级
-  const mapById = CLASS_CACHE.mapById || {};
-  let cur = mapById[t];
-  let guard = 0;
+  if (/电影/.test(n)) return "电影";
+  if (/动漫|动画/.test(n)) return "动漫";
+  if (/电视/.test(n)) return "电视剧";
+  // 连续剧、网剧等 -> 电视剧；排除短剧/解说/预告/片花等非正片分类
+  if (/剧/.test(n) && !/短剧|解说|预告|片花|花絮|资讯/.test(n)) return "电视剧";
+  return "";
+}
 
-  while (cur && guard < 10) {
-    guard += 1;
-    // 如果它没有父级，或者父级是0，说明它本身就是一级分类
-    if (!cur.type_pid || cur.type_pid === "0" || cur.type_pid === cur.type_id) {
-      return cur.type_id;
+// 从二级分类名称反推父级主分类 ID
+function inferMainTypeIdFromChildren(targetName) {
+  const childKeywords = {
+    "电影": /动作片|喜剧片|爱情片|科幻片|恐怖片|惊悚片|战争片|剧情片|犯罪片|冒险片|悬疑片|武侠片|灾难片|纪录片|电影/,
+    "电视剧": /国产剧|港台剧|港剧|台剧|日韩剧|日剧|韩剧|欧美剧|美剧|英剧|泰剧|海外剧|网剧|连续剧|电视剧/,
+    "动漫": /国产动漫|日本动漫|欧美动漫|动漫|动画/
+  };
+  const re = childKeywords[targetName];
+  if (!re) return "";
+
+  const topLevel = CLASS_CACHE.list.filter((c) => !c.type_pid || c.type_pid === "0" || c.type_pid === c.type_id);
+  if (!topLevel.length) return "";
+
+  const candidates = CLASS_CACHE.list.filter((c) => re.test(text(c.type_name)));
+  for (const c of candidates) {
+    let cur = c;
+    let guard = 0;
+    while (cur && guard < 10) {
+      guard += 1;
+      const pid = text(cur.type_pid);
+      if (!pid || pid === "0" || pid === cur.type_id) return cur.type_id;
+      cur = CLASS_CACHE.mapById[pid];
     }
-    // 如果它的名字正好是我们要的主分类，直接返回
-    if (MAIN_CATEGORIES.some((m) => m.type_id === cur.type_id)) {
-       return cur.type_id;
-    }
-    cur = mapById[cur.type_pid];
   }
-
-  // 如果动态找不到，回退到默认的兜底
-  if (MAIN_CATEGORIES.some((m) => m.type_id === t)) return t;
-  return text(fallbackMain);
+  return "";
 }
 
 function getMainTypeName(typeId) {
@@ -186,14 +185,37 @@ function getMainTypeName(typeId) {
 
   const cached = CLASS_CACHE.mapById?.[id];
   if (cached) {
-    const normalized = normalizeMainTypeName(cached.type_name);
+    const normalized = classifyMainTypeName(cached.type_name);
     if (normalized) return normalized;
   }
 
   const fallback = MAIN_CATEGORIES.find((m) => m.type_id === id);
-  if (fallback) return fallback.type_name;
+  return fallback ? fallback.type_name : "";
+}
 
-  return normalizeMainTypeName(id);
+// 核心修复 1：动态解析父类ID
+function resolveMainTypeId(typeId, fallbackMain = "") {
+  const t = text(typeId);
+  if (!t) return text(fallbackMain);
+
+  const mapById = CLASS_CACHE.mapById || {};
+  let cur = mapById[t];
+  let guard = 0;
+
+  while (cur && guard < 10) {
+    guard += 1;
+    if (!cur.type_pid || cur.type_pid === "0" || cur.type_pid === cur.type_id) {
+      return cur.type_id;
+    }
+    // 如果已经是主分类，直接返回
+    if (MAIN_CATEGORIES.some((m) => m.type_id === cur.type_id)) {
+      return cur.type_id;
+    }
+    cur = mapById[cur.type_pid];
+  }
+
+  if (MAIN_CATEGORIES.some((m) => m.type_id === t)) return t;
+  return text(fallbackMain);
 }
 
 function isMainBlocked(mainTypeId) {
@@ -205,10 +227,8 @@ function isTvShowName(vodName, typeName) {
   const name = text(vodName);
   const tname = text(typeName);
 
-  // 如果分类名已经标明了是剧集/动漫/综艺，不算错放
   if (/剧|动漫|综艺|纪录|动画/i.test(tname)) return false;
 
-  // 匹配常见的电视剧特征词
   const tvKeywords = [
     /第\s*[\d一二三四五六七八九十百]+\s*[集话期回]/,
     /全\s*[\d一二三四五六七八九十百]+\s*[集话期回]/,
@@ -219,42 +239,53 @@ function isTvShowName(vodName, typeName) {
     /电视剧|连续剧|网剧/
   ];
 
-  return tvKeywords.some(regex => regex.test(name));
+  return tvKeywords.some((regex) => regex.test(name));
 }
 
-// 获取主分类列表：固定为 电影 / 电视剧 / 动漫
-function buildMainClasses() {
+// 获取主分类列表：固定为 电影 / 电视剧 / 动漫，ID 从源站动态解析
+async function buildMainClasses() {
   const desired = [
-    { type_id: "", type_name: "电影", aliases: ["电影"] },
-    { type_id: "", type_name: "电视剧", aliases: ["电视剧", "连续剧"] },
-    { type_id: "", type_name: "动漫", aliases: ["动漫", "动画", "动画片"] }
+    { name: "电影", id: "7" },
+    { name: "电视剧", id: "8" },
+    { name: "动漫", id: "40" }
   ];
 
-  // 优先从源站真实分类树里解析顶级分类
-  if (CLASS_CACHE.list.length > 0) {
-    const topLevel = CLASS_CACHE.list.filter((c) => !c.type_pid || c.type_pid === "0");
+  const result = [];
+  const topLevel = CLASS_CACHE.list.filter((c) => !c.type_pid || c.type_pid === "0" || c.type_pid === c.type_id);
 
-    if (topLevel.length > 0) {
-      return desired
-        .map((d) => {
-          const hit = topLevel.find((c) => d.aliases.includes(text(c.type_name)));
-          if (hit) return { type_id: hit.type_id, type_name: d.type_name };
+  // 如果源站缓存可用，优先动态解析
+  if (topLevel.length > 0) {
+    for (const d of desired) {
+      // 1. 顶级分类名称直接匹配
+      let hit = topLevel.find((c) => classifyMainTypeName(c.type_name) === d.name);
 
-          // 如果源站顶级分类里没有对应分类，则使用兜底 type_id
-          const fallback = MAIN_CATEGORIES.find((m) => m.type_name === d.type_name);
-          return fallback ? { ...fallback } : null;
-        })
-        .filter(Boolean);
+      // 2. 顶级匹配不到，用二级分类反推父级 ID
+      if (!hit) {
+        const inferredId = inferMainTypeIdFromChildren(d.name);
+        if (inferredId) {
+          const parent = CLASS_CACHE.mapById[inferredId];
+          hit = parent || { type_id: inferredId, type_name: d.name };
+        }
+      }
+
+      if (hit) {
+        result.push({ type_id: hit.type_id, type_name: d.name });
+      }
+    }
+
+    if (result.length > 0) {
+      await OmniBox.log("info", `[buildMainClasses] 动态解析主分类: ${JSON.stringify(result)}`);
+      return result;
     }
   }
 
-  // 缓存还没拉回来时，使用兜底
-  return MAIN_CATEGORIES.map((c) => ({ ...c }));
+  // 源站缓存不可用或完全解析失败时，才使用写死的兜底 ID
+  await OmniBox.log("warn", "[buildMainClasses] 动态解析失败，使用写死的兜底分类 ID");
+  return desired.map((d) => ({ type_id: d.id, type_name: d.name }));
 }
 
 function buildFiltersForMain(mainTypeId) {
   const key = text(mainTypeId);
-  // 动态获取该父分类下的所有子分类
   const children = (CLASS_CACHE.childMap?.[key] || [])
     .filter((c) => c.type_id !== key)
     .map((c) => ({ type_id: c.type_id, type_name: c.type_name }));
@@ -271,8 +302,15 @@ function buildFiltersForMain(mainTypeId) {
 
 function getChildTypeIds(mainTypeId) {
   const key = text(mainTypeId);
-  return (CLASS_CACHE.childMap?.[key] || [])
+  const children = (CLASS_CACHE.childMap?.[key] || [])
     .filter((c) => c.type_id && c.type_id !== key)
+    .map((c) => c.type_id);
+
+  if (children.length) return children;
+
+  // 兜底：如果 childMap 没构建出来，直接按 type_pid 过滤
+  return CLASS_CACHE.list
+    .filter((c) => text(c.type_pid) === key && c.type_id !== key)
     .map((c) => c.type_id);
 }
 
@@ -296,9 +334,9 @@ async function enrichVideosWithDetails(rawList, mainTypeId = "") {
     };
   });
 
-  // 【核心过滤】如果我们在电影分类里，干掉明显的剧集
+  // 【核心过滤】电影主分类下，干掉明显的剧集
   const isMovieContext = getMainTypeName(mainTypeId) === "电影";
-  const filteredVideos = videos.filter(v => {
+  const filteredVideos = videos.filter((v) => {
     if (isMovieContext && isTvShowName(v.vod_name, v.type_name)) {
       return false;
     }
@@ -306,18 +344,18 @@ async function enrichVideosWithDetails(rawList, mainTypeId = "") {
   });
 
   // 批量补全图片
-  const needDetailVideos = filteredVideos.filter(v => v._needDetail);
+  const needDetailVideos = filteredVideos.filter((v) => v._needDetail);
   if (needDetailVideos.length > 0) {
     const batchSize = 20;
     for (let i = 0; i < needDetailVideos.length; i += batchSize) {
       const batch = needDetailVideos.slice(i, i + batchSize);
-      const ids = batch.map(v => v.vod_id).join(",");
+      const ids = batch.map((v) => v.vod_id).join(",");
       try {
         const detailData = await fetchApi({ ac: "detail", ids });
         if (Array.isArray(detailData.list)) {
-          detailData.list.forEach(detailItem => {
+          detailData.list.forEach((detailItem) => {
             const vid = text(detailItem.vod_id);
-            const target = filteredVideos.find(v => v.vod_id === vid);
+            const target = filteredVideos.find((v) => v.vod_id === vid);
             if (target) {
               const pic = fixUrl(detailItem.vod_pic);
               if (pic) target.vod_pic = pic;
@@ -478,11 +516,11 @@ function buildDanmakuFileName(scrapeData, mapping, fallbackTitle, fallbackEpName
   return title || `${fallbackTitle || ""} ${fallbackEpName || ""}`.trim();
 }
 
-// 核心修复 3：请求时动态拼装真实的子分类ID列表
+// 核心修复 3：优先聚合子分类，空数据时降级为直查父分类
 async function fetchMainAllByChildren(mainTypeId, page) {
   const childTypeIds = getChildTypeIds(mainTypeId);
 
-  // 如果没有子分类，直接查询父分类
+  // 没有子分类，直接查询父分类
   if (!childTypeIds.length) {
     const direct = await fetchApi({ ac: "list", t: text(mainTypeId), pg: page });
     const rawList = (Array.isArray(direct.list) ? direct.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
@@ -490,7 +528,7 @@ async function fetchMainAllByChildren(mainTypeId, page) {
     return { list, page: Number(direct.page || page || 1), pagecount: Number(direct.pagecount || page || 1), total: Number(direct.total || list.length || 0), limit: Number(direct.limit || 20) };
   }
 
-  // 如果有多级分类，同时并发请求
+  // 并发请求所有子分类
   const results = await Promise.all(childTypeIds.map((tid) => fetchApi({ ac: "list", t: tid, pg: page })));
   const mergedRaw = [];
   let total = 0, pagecount = 0, limit = 20;
@@ -510,7 +548,17 @@ async function fetchMainAllByChildren(mainTypeId, page) {
     return true;
   });
 
-  const list = await enrichVideosWithDetails(uniqueRaw, mainTypeId);
+  let list = await enrichVideosWithDetails(uniqueRaw, mainTypeId);
+
+  // 子分类聚合为空时，降级直查父分类，避免空数据
+  if (list.length === 0) {
+    await OmniBox.log("warn", `[fetchMainAllByChildren] 主分类 ${mainTypeId} 子分类聚合为空，降级为直查父分类`);
+    const direct = await fetchApi({ ac: "list", t: text(mainTypeId), pg: page });
+    const rawList = (Array.isArray(direct.list) ? direct.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
+    list = await enrichVideosWithDetails(rawList, mainTypeId);
+    return { list, page, pagecount: Number(direct.pagecount || page || 1), total: Number(direct.total || list.length || 0), limit: Number(direct.limit || 20) };
+  }
+
   list.sort((a, b) => Number(b.vod_id || 0) - Number(a.vod_id || 0));
   return { list, page, pagecount: pagecount || page, total: total || list.length, limit };
 }
@@ -518,9 +566,8 @@ async function fetchMainAllByChildren(mainTypeId, page) {
 async function home(params, context) {
   await ensureClassCache(); // 必须先拉取分类缓存
   const data = await fetchApi({ ac: "list", pg: 1 });
-  const classes = buildMainClasses();
+  const classes = await buildMainClasses();
 
-  // 首页的 `全部` 标签，不需要过度过滤
   const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
   const list = await enrichVideosWithDetails(rawList, "");
 
@@ -545,7 +592,6 @@ async function category(params, context) {
     // 指定了子分类，直接查询该子分类
     const data = await fetchApi({ ac: "list", t: subtype, pg: page });
     const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
-    // 传入 mainTypeId，如果是在“电影”分类下选子分类，依然会过滤剧集
     const list = await enrichVideosWithDetails(rawList, mainTypeId);
     result = { list, page: Number(data.page || page || 1), pagecount: Number(data.pagecount || page || 1), total: Number(data.total || list.length || 0), limit: Number(data.limit || 20) };
   } else {
@@ -564,7 +610,6 @@ async function search(params, context) {
   if (!keyword) return { list: [], page: 1, pagecount: 0, total: 0 };
 
   const data = await fetchApi({ ac: "list", wd: keyword, pg: page });
-  // 搜索不需要过滤，搜到什么就是什么
   const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
   const list = await enrichVideosWithDetails(rawList, "");
 

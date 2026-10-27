@@ -3,7 +3,7 @@
 // @description 刮削：支持，弹幕：支持，嗅探：支持，观看记录：支持，广告：菠菜
 // @dependencies: axios
 // @version 1.1.9
-// @downloadURL https://gh-proxy.org/https://github.com/lansepyy/OmniBox-Spider/raw/refs/heads/main/影视/采集/爱芒果tv.js
+// @downloadURL https://gh-proxy.org/https://github.com/lansepyy/OmniBox-Spider/raw/refs/heads/main/影视/采集/芒果tv.js
 
 /**
  * ============================================================================

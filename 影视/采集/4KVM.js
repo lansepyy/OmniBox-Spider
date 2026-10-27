@@ -2,7 +2,7 @@
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, cheerio
-// @version 1.2.4
+// @version 1.2.5
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/4KVM.js
 
 /**
@@ -34,6 +34,15 @@ const config = {
 // 弹幕 API 地址(优先使用环境变量)
 const DANMU_API = process.env.DANMU_API || "";
 
+// ========== 超时配置 ==========
+const SCRAPE_TIMEOUT = 5 * 1000;      // 详情页刮削超时
+const SNIFF_TIMEOUT = 10 * 1000;      // 播放页嗅探超时（原来 2.5s 太短，很多页面嗅探需要 5~10s）
+const DANMU_TIMEOUT = 2 * 1000;       // 弹幕匹配超时
+
+// ========== 缓存 ==========
+const htmlCache = new Map();
+const HTML_CACHE_TTL = 10 * 60 * 1000;
+
 const axiosInstance = axios.create({
     timeout: 15 * 1000,
     httpsAgent: new https.Agent({ keepAlive: true, rejectUnauthorized: false }),
@@ -46,31 +55,28 @@ const PLAY_HEADERS = {
     "Origin": "https://www.4kvm.org"
 };
 
-// ========== 缓存 ==========
-const htmlCache = new Map();
-const HTML_CACHE_TTL = 10 * 60 * 1000;
+/**
+* 日志工具函数
+*/
+const logInfo = (message, data = null) => {
+    const output = data ? `${message}: ${JSON.stringify(data)}` : message;
+    OmniBox.log("info", `[4KVM-DEBUG] ${output}`);
+};
 
-async function getHtml(url, ttl = HTML_CACHE_TTL) {
-    const now = Date.now();
-    const hit = htmlCache.get(url);
-    if (hit && hit.expireAt > now) {
-        logInfo(`命中HTML缓存: ${url}`);
-        return hit.html;
-    }
+const logError = (message, error) => {
+    OmniBox.log("error", `[4KVM-DEBUG] ${message}: ${error.message || error}`);
+};
 
-    const response = await axiosInstance.get(url, { headers: config.headers });
-    const html = response.data;
-    htmlCache.set(url, { html, expireAt: now + ttl });
-    return html;
-}
-
-// ========== 通用超时工具 ==========
-function withTimeout(promise, ms, fallback = null) {
+/**
+* 通用超时工具
+*/
+function withTimeout(promise, ms, fallback = null, label = "") {
     return new Promise((resolve) => {
         let settled = false;
         const timer = setTimeout(() => {
             if (!settled) {
                 settled = true;
+                if (label) logInfo(`操作超时(${ms}ms): ${label}`);
                 resolve(fallback);
             }
         }, ms);
@@ -83,28 +89,32 @@ function withTimeout(promise, ms, fallback = null) {
                     resolve(value);
                 }
             })
-            .catch(() => {
+            .catch((err) => {
                 if (!settled) {
                     settled = true;
                     clearTimeout(timer);
+                    if (label) logInfo(`操作失败: ${label} - ${err.message || err}`);
                     resolve(fallback);
                 }
-                // 超时后的晚到错误直接吞掉，避免 unhandled rejection
             });
     });
 }
 
 /**
-* 日志工具函数
+* 带缓存的页面抓取
 */
-const logInfo = (message, data = null) => {
-    const output = data ? `${message}: ${JSON.stringify(data)}` : message;
-    OmniBox.log("info", `[4KVM-DEBUG] ${output}`);
-};
+async function getHtml(url, ttl = HTML_CACHE_TTL) {
+    const now = Date.now();
+    const hit = htmlCache.get(url);
+    if (hit && hit.expireAt > now) {
+        return hit.html;
+    }
 
-const logError = (message, error) => {
-    OmniBox.log("error", `[4KVM-DEBUG] ${message}: ${error.message || error}`);
-};
+    const response = await axiosInstance.get(url, { headers: config.headers });
+    const html = response.data;
+    htmlCache.set(url, { html, expireAt: now + ttl });
+    return html;
+}
 
 const encodeMeta = (obj) => {
     try {
@@ -129,7 +139,7 @@ const decodeMeta = (str) => {
 const sniff4kvmPlay = async (playUrl) => {
     if (!playUrl) return null;
     try {
-        logInfo("尝试嗅探播放页", playUrl);
+        logInfo("开始嗅探播放页", playUrl);
         const sniffed = await OmniBox.sniffVideo(playUrl);
         if (sniffed && sniffed.url) {
             logInfo("嗅探成功", sniffed.url);
@@ -139,6 +149,7 @@ const sniff4kvmPlay = async (playUrl) => {
                 header: sniffed.header || { ...PLAY_HEADERS, "Referer": playUrl }
             };
         }
+        logInfo("嗅探无结果");
     } catch (error) {
         logInfo(`嗅探失败: ${error.message}`);
     }
@@ -311,7 +322,6 @@ const getEpisodeCount = ($seasonData, pageHtml) => {
                 logInfo("集数检测命中方法1: .jujiepisodios", { count: result, samples: episodeNumbers.slice(0, 10) });
                 return result;
             }
-            logInfo("集数检测方法1未命中: .jujiepisodios无有效数字");
         }
 
         // 方法2: JavaScript数据提取
@@ -329,7 +339,6 @@ const getEpisodeCount = ($seasonData, pageHtml) => {
                     }
                 }
             }
-            logInfo("集数检测方法2未命中: JS数据未形成连续集数");
         }
 
         // 方法3: 文本模式匹配
@@ -343,7 +352,6 @@ const getEpisodeCount = ($seasonData, pageHtml) => {
                 return result;
             }
         }
-        logInfo("集数检测方法3未命中: 文本模式无匹配");
 
         return null;
     } catch (error) {
@@ -375,7 +383,7 @@ const getSeasonEpisodes = async ($, detailUrl) => {
         const parsed = parseInt(spanText, 10);
         if (!Number.isNaN(parsed) && parsed > 0) {
             detailCount = parsed;
-            OmniBox.log("info", `集数检测命中方法0: .custom_fields span ${parsed}`);
+            logInfo(`集数检测命中方法0: .custom_fields span ${parsed}`);
         }
     }
 
@@ -401,7 +409,7 @@ const getSeasonEpisodes = async ($, detailUrl) => {
                 }
             }
 
-            // 检测失败兜底，沿用原逻辑
+            // 检测失败兜底
             if (!count || count <= 0) {
                 count = $seasonData('iframe, video, .player').length ? 24 : 1;
             }
@@ -459,7 +467,6 @@ const extractPlayOptions = ($, detailUrl) => {
 
 /**
 * 将播放链接数组转换为 vod_play_sources 格式
-* 拼接格式: URL|视频名|集数名
 */
 const parsePlaySources = (playLinks, vodName, videoId = "") => {
     if (!playLinks || playLinks.length === 0) {
@@ -579,7 +586,6 @@ const filterSearchResults = (results, searchKey) => {
         const title = (result.vod_name || '').toLowerCase();
         let score = 0;
 
-        // 计算相关性分数
         if (searchKeyLower === title) {
             score = 100;
         } else if (title.includes(searchKeyLower)) {
@@ -597,7 +603,6 @@ const filterSearchResults = (results, searchKey) => {
             }
         }
 
-        // 内容类型加分
         if (searchKeyLower.includes('剧') && result.vod_id.includes('tvshows')) {
             score += 5;
         } else if (searchKeyLower.includes('电影') && result.vod_id.includes('movies')) {
@@ -607,14 +612,11 @@ const filterSearchResults = (results, searchKey) => {
         scoredResults.push({ score, result });
     }
 
-    // 排序
     scoredResults.sort((a, b) => b.score - a.score);
 
-    // 过滤低分结果
     const minScore = searchWords.length > 1 ? 30 : 40;
     let filtered = scoredResults.filter(item => item.score >= minScore).map(item => item.result);
 
-    // 如果结果太少,放宽标准
     if (filtered.length < 3 && scoredResults.length > 3) {
         filtered = scoredResults.slice(0, 10).map(item => item.result);
     }
@@ -673,7 +675,6 @@ function extractEpisode(title) {
     const bracketMatch = processedTitle.match(/[\[\(【（](\d{1,3})[\]\)】）]/);
     if (bracketMatch) {
         const num = bracketMatch[1];
-        // 排除常见分辨率
         if (!["720", "1080", "480"].includes(num)) return num;
     }
 
@@ -688,7 +689,6 @@ function extractEpisode(title) {
             });
 
         if (candidates.length > 0) {
-            // 优先取 1-99 之间的
             const normalEp = candidates.find(n => parseInt(n) < 100);
             return normalEp || candidates[0];
         }
@@ -705,13 +705,11 @@ function inferFileNameFromURL(url) {
         const urlObj = new URL(url);
         let base = urlObj.pathname.split("/").pop() || "";
 
-        // 去掉扩展名
         const dotIndex = base.lastIndexOf(".");
         if (dotIndex > 0) {
             base = base.substring(0, dotIndex);
         }
 
-        // 清理分隔符
         base = base.replace(/[_-]/g, " ").replace(/\./g, " ").trim();
 
         return base || url;
@@ -748,19 +746,16 @@ async function matchDanmu(fileName) {
 
         const matchData = JSON.parse(response.body);
 
-        // 检查是否匹配成功
         if (!matchData.isMatched) {
             logInfo("弹幕未匹配到");
             return [];
         }
 
-        // 获取matches数组
         const matches = matchData.matches || [];
         if (matches.length === 0) {
             return [];
         }
 
-        // 取第一个匹配项
         const firstMatch = matches[0];
         const episodeId = firstMatch.episodeId;
         const animeTitle = firstMatch.animeTitle || "";
@@ -770,7 +765,6 @@ async function matchDanmu(fileName) {
             return [];
         }
 
-        // 构建弹幕名称
         let danmakuName = "弹幕";
         if (animeTitle && episodeTitle) {
             danmakuName = `${animeTitle} - ${episodeTitle}`;
@@ -780,7 +774,6 @@ async function matchDanmu(fileName) {
             danmakuName = episodeTitle;
         }
 
-        // 构建弹幕URL
         const danmakuURL = `${DANMU_API}/api/v2/comment/${episodeId}?format=xml`;
 
         logInfo(`弹幕匹配成功: ${danmakuName}`);
@@ -803,17 +796,14 @@ async function matchDanmu(fileName) {
 function buildFileNameForDanmu(vodName, episodeTitle) {
     if (!vodName) return "";
 
-    // 如果没有集数信息，直接返回视频名（电影）
     if (!episodeTitle || episodeTitle === '正片' || episodeTitle === '播放') {
         return vodName;
     }
 
-    // 提取集数
     const digits = extractEpisode(episodeTitle);
     if (digits) {
         const epNum = parseInt(digits, 10);
         if (epNum > 0) {
-            // 构建标准格式：视频名 S01E01
             if (epNum < 10) {
                 return `${vodName} S01E0${epNum}`;
             } else {
@@ -822,7 +812,6 @@ function buildFileNameForDanmu(vodName, episodeTitle) {
         }
     }
 
-    // 无法提取集数，返回视频名
     return vodName;
 }
 
@@ -958,7 +947,7 @@ async function detail(params) {
 
         logInfo(`视频标题: ${vod.vod_name}`);
 
-        // 获取播放链接：优先使用新前端已渲染好的选集锚点
+        // 获取播放链接
         let playLinks = extractPlayOptions($, videoId);
         let seasonSources = [];
         const videoIdForScrape = String(videoId || "");
@@ -1012,9 +1001,10 @@ async function detail(params) {
                         vod.vod_name || "",
                         scrapeCandidatesToProcess
                     ),
-                    3000
+                    SCRAPE_TIMEOUT,
+                    null,
+                    "详情页刮削"
                 );
-                OmniBox.log("info", `[4KVM-DEBUG] 刮削处理已提交`);
 
                 const metadata = await OmniBox.getScrapeMetadata(videoIdForScrape);
                 scrapeData = metadata?.scrapeData || null;
@@ -1146,21 +1136,20 @@ async function play(params) {
     let episodeName = "";
     let playMeta = {};
 
-    // 关键修改：解析透传参数
+    // 解析透传参数
     if (playId && playId.includes("|||")) {
         const [mainPlayId, metaB64] = playId.split("|||");
         playId = mainPlayId;
         playMeta = decodeMeta(metaB64 || "");
         vodName = playMeta.v || "";
         episodeName = playMeta.e || "";
-        logInfo(`解析透传信息 - 视频: ${vodName}, 集数: ${episodeName}`);
+        logInfo(`解析透传信息 - 视频: ${vodName}, 集数: ${episodeName}, 真实playId: ${playId}`);
     } else if (playId && playId.includes('|')) {
-        // 兼容旧格式
         const parts = playId.split('|');
-        playId = parts[0];      // 真正的 URL
+        playId = parts[0];
         vodName = parts[1] || "";
         episodeName = parts[2] || "";
-        logInfo(`解析透传信息 - 视频: ${vodName}, 集数: ${episodeName}`);
+        logInfo(`解析旧格式透传信息 - 视频: ${vodName}, 集数: ${episodeName}`);
     }
 
     let scrapedDanmuFileName = "";
@@ -1192,7 +1181,6 @@ async function play(params) {
     }
 
     try {
-        // 解析参数
         let dataPost = null;
         let dataNume = null;
         let dataType = null;
@@ -1208,6 +1196,7 @@ async function play(params) {
                 if (key === 'nume') dataNume = value;
                 if (key === 'type') dataType = value;
             }
+            logInfo(`解析播放参数: post=${dataPost}, nume=${dataNume}, type=${dataType}`);
         }
 
         let playResponse = {
@@ -1220,6 +1209,8 @@ async function play(params) {
         if (dataPost && dataNume) {
             try {
                 const apiUrl = `${config.host}/wp-json/dooplayer/v1/post/${dataPost}`;
+                logInfo(`调用播放API: ${apiUrl}, source=${dataNume}`);
+
                 const apiResponse = await axiosInstance.get(apiUrl, {
                     headers: config.headers,
                     params: {
@@ -1235,9 +1226,11 @@ async function play(params) {
                         embedUrl.toLowerCase().includes(ext)
                     ) ? 0 : 1;
 
-                    logInfo(`API解析成功: ${embedUrl}`);
+                    logInfo(`API解析成功: ${embedUrl}, parse=${parseFlag}`);
                     playResponse.urls = [{ name: "4KVM", url: embedUrl }];
                     playResponse.parse = parseFlag;
+                } else {
+                    logInfo(`API返回异常: HTTP ${apiResponse.status}`);
                 }
             } catch (error) {
                 logError("API调用失败", error);
@@ -1246,10 +1239,10 @@ async function play(params) {
 
         // 如果API调用失败，页面解析回退
         if (playResponse.urls[0].url === playId) {
+            logInfo(`API未返回直链，尝试页面解析: ${baseUrl}`);
             const html = await getHtml(baseUrl);
             const $ = cheerio.load(html);
 
-            // 查找iframe
             const iframe = $('iframe.metaframe, .dooplay_player iframe, .player iframe').first().attr('src');
             if (iframe) {
                 const iframeUrl = normalizeUrl(iframe);
@@ -1257,16 +1250,17 @@ async function play(params) {
                     iframeUrl.toLowerCase().includes(ext)
                 ) ? 0 : 1;
 
-                logInfo(`Iframe解析: ${iframeUrl}`);
+                logInfo(`Iframe解析: ${iframeUrl}, parse=${parseFlag}`);
                 playResponse.urls = [{ name: "4KVM", url: iframeUrl }];
                 playResponse.parse = parseFlag;
             } else {
-                // 查找video标签
                 const videoSrc = normalizeUrl($('video source, video').first().attr('src'));
                 if (videoSrc) {
                     logInfo(`Video标签解析: ${videoSrc}`);
                     playResponse.urls = [{ name: "4KVM", url: videoSrc }];
                     playResponse.parse = 0;
+                } else {
+                    logInfo("页面解析未找到 iframe/video");
                 }
             }
         }
@@ -1274,15 +1268,22 @@ async function play(params) {
         // 非直链时嗅探，带超时
         const currentUrl = playResponse.urls[0]?.url;
         if (currentUrl && !/\.(m3u8|mp4|flv|avi|mkv|ts)(\?|$)/i.test(currentUrl)) {
-            const sniffResult = await withTimeout(sniff4kvmPlay(currentUrl), 2500);
+            logInfo(`当前地址非直链，开始嗅探: ${currentUrl}`);
+            const sniffResult = await withTimeout(
+                sniff4kvmPlay(currentUrl),
+                SNIFF_TIMEOUT,
+                null,
+                "播放页嗅探"
+            );
             if (sniffResult) {
                 playResponse = sniffResult;
+                logInfo("嗅探结果已采用");
+            } else {
+                logInfo("嗅探超时或失败，保留原地址返回");
             }
+        } else {
+            logInfo(`当前地址为直链，跳过嗅探: ${currentUrl}`);
         }
-
-        OmniBox.log("info", `播放解析完成: ${playId}`);
-
-        OmniBox.log("info", `DANMU_API: ${DANMU_API}, params.vodName：${params.vodName}`);
 
         // 弹幕匹配，带超时
         if (DANMU_API && (vodName || params.vodName)) {
@@ -1293,17 +1294,23 @@ async function play(params) {
             logInfo(`尝试匹配弹幕文件名: ${fileName}`);
 
             if (fileName) {
-                const danmakuList = await withTimeout(matchDanmu(fileName), 2000, []);
+                const danmakuList = await withTimeout(matchDanmu(fileName), DANMU_TIMEOUT, [], "弹幕匹配");
                 if (danmakuList && danmakuList.length > 0) {
                     playResponse.danmaku = danmakuList;
                 }
             }
         }
 
+        logInfo(`最终播放返回: ${JSON.stringify({
+            url: playResponse.urls?.[0]?.url,
+            parse: playResponse.parse,
+            hasDanmaku: !!(playResponse.danmaku && playResponse.danmaku.length > 0)
+        })}`);
+
         return playResponse;
     } catch (error) {
         logError("播放解析失败", error);
-        const fallbackSniff = await withTimeout(sniff4kvmPlay(playId), 2500);
+        const fallbackSniff = await withTimeout(sniff4kvmPlay(playId), SNIFF_TIMEOUT, null, "失败兜底嗅探");
         if (fallbackSniff) {
             return fallbackSniff;
         }

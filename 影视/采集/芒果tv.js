@@ -2,15 +2,16 @@
 // @author OpenClaw Bingbu + 梦
 // @description 刮削：支持，弹幕：支持，嗅探：支持，观看记录：支持，广告：菠菜
 // @dependencies: axios
-// @version 1.1.3
+// @version 1.1.4
 // @downloadURL https://gh-proxy.org/https://github.com/lansepyy/OmniBox-Spider/raw/refs/heads/main/影视/采集/爱芒果tv.js
 
 /**
  * ============================================================================
  * 芒果tv OmniBox 站源（增强版）
  * 站点: https://caiji.mgzyapi.com
- * 
+ *
  * 更新日志：
+ * - v1.1.4: 主分类固定为 电影/电视剧/动漫，子分类继续动态解析源站分类树。
  * - v1.1.3: 修复分类不准确（电影里混入剧集），动态重构父子分类映射。
  * ============================================================================
  */
@@ -23,14 +24,22 @@ const HOST = "https://caiji.mgzyapi.com";
 const API = `${HOST}/api.php/provide/vod`;
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
 
-// 注意：这里仅作为兜底展示，真正的分类关系我们会在运行时动态从源站解析
+// 主分类固定为这三个；type_id 仅作兜底，实际会优先使用源站动态解析出的顶级分类 ID
 const MAIN_CATEGORIES = [
   { type_id: "7", type_name: "电影" },
-  { type_id: "8", type_name: "连续剧" },
-  { type_id: "9", type_name: "综艺" },
-  { type_id: "40", type_name: "动漫" },
-  { type_id: "39", type_name: "伦理片" }
+  { type_id: "8", type_name: "电视剧" },
+  { type_id: "40", type_name: "动漫" }
 ];
+
+// 源站分类名 -> 前端主分类名 的归一化映射
+const MAIN_TYPE_ALIASES = {
+  "电影": "电影",
+  "电视剧": "电视剧",
+  "连续剧": "电视剧",
+  "动漫": "动漫",
+  "动画": "动漫",
+  "动画片": "动漫"
+};
 
 const DEFAULT_BLOCKED_MAIN = ["39"];
 
@@ -62,6 +71,10 @@ function safeJson(input, fallback = {}) {
 
 function text(v) {
   return String(v == null ? "" : v).trim();
+}
+
+function normalizeMainTypeName(name) {
+  return MAIN_TYPE_ALIASES[text(name)] || "";
 }
 
 function fixUrl(url) {
@@ -108,7 +121,7 @@ function updateClassCache(classList) {
 
   const mapById = {};
   const childMap = {};
-  
+
   // 动态构建分类树
   classes.forEach((c) => {
     mapById[c.type_id] = c;
@@ -143,12 +156,12 @@ async function ensureClassCache() {
 function resolveMainTypeId(typeId, fallbackMain = "") {
   const t = text(typeId);
   if (!t) return text(fallbackMain);
-  
+
   // 优先从动态缓存中找它的父级
   const mapById = CLASS_CACHE.mapById || {};
   let cur = mapById[t];
   let guard = 0;
-  
+
   while (cur && guard < 10) {
     guard += 1;
     // 如果它没有父级，或者父级是0，说明它本身就是一级分类
@@ -167,6 +180,22 @@ function resolveMainTypeId(typeId, fallbackMain = "") {
   return text(fallbackMain);
 }
 
+function getMainTypeName(typeId) {
+  const id = text(typeId);
+  if (!id) return "";
+
+  const cached = CLASS_CACHE.mapById?.[id];
+  if (cached) {
+    const normalized = normalizeMainTypeName(cached.type_name);
+    if (normalized) return normalized;
+  }
+
+  const fallback = MAIN_CATEGORIES.find((m) => m.type_id === id);
+  if (fallback) return fallback.type_name;
+
+  return normalizeMainTypeName(id);
+}
+
 function isMainBlocked(mainTypeId) {
   return getBlockedMainSet().has(text(mainTypeId));
 }
@@ -175,7 +204,7 @@ function isMainBlocked(mainTypeId) {
 function isTvShowName(vodName, typeName) {
   const name = text(vodName);
   const tname = text(typeName);
-  
+
   // 如果分类名已经标明了是剧集/动漫/综艺，不算错放
   if (/剧|动漫|综艺|纪录|动画/i.test(tname)) return false;
 
@@ -189,29 +218,38 @@ function isTvShowName(vodName, typeName) {
     /\bS\d{1,2}E\d{1,2}\b/i,
     /电视剧|连续剧|网剧/
   ];
-  
+
   return tvKeywords.some(regex => regex.test(name));
 }
 
-// 获取主分类列表
+// 获取主分类列表：固定为 电影 / 电视剧 / 动漫
 function buildMainClasses() {
-  if (CLASS_CACHE.list.length === 0) {
-    // 如果缓存还没拉回来，先用兜底
-    return MAIN_CATEGORIES.filter((c) => !isMainBlocked(c.type_id));
+  const desired = [
+    { type_id: "", type_name: "电影", aliases: ["电影"] },
+    { type_id: "", type_name: "电视剧", aliases: ["电视剧", "连续剧"] },
+    { type_id: "", type_name: "动漫", aliases: ["动漫", "动画", "动画片"] }
+  ];
+
+  // 优先从源站真实分类树里解析顶级分类
+  if (CLASS_CACHE.list.length > 0) {
+    const topLevel = CLASS_CACHE.list.filter((c) => !c.type_pid || c.type_pid === "0");
+
+    if (topLevel.length > 0) {
+      return desired
+        .map((d) => {
+          const hit = topLevel.find((c) => d.aliases.includes(text(c.type_name)));
+          if (hit) return { type_id: hit.type_id, type_name: d.type_name };
+
+          // 如果源站顶级分类里没有对应分类，则使用兜底 type_id
+          const fallback = MAIN_CATEGORIES.find((m) => m.type_name === d.type_name);
+          return fallback ? { ...fallback } : null;
+        })
+        .filter(Boolean);
+    }
   }
-  
-  // 从源站的真实分类树里，找出真正的顶级分类（type_pid == 0）
-  const topLevel = CLASS_CACHE.list.filter(c => !c.type_pid || c.type_pid === "0");
-  
-  // 如果源站没返回顶级分类，依然用兜底
-  if (topLevel.length === 0) {
-     return MAIN_CATEGORIES.filter((c) => !isMainBlocked(c.type_id));
-  }
-  
-  // 将顶级分类映射成前端要的格式，并过滤屏蔽
-  return topLevel
-    .filter(c => !isMainBlocked(c.type_id))
-    .map(c => ({ type_id: c.type_id, type_name: c.type_name }));
+
+  // 缓存还没拉回来时，使用兜底
+  return MAIN_CATEGORIES.map((c) => ({ ...c }));
 }
 
 function buildFiltersForMain(mainTypeId) {
@@ -220,9 +258,9 @@ function buildFiltersForMain(mainTypeId) {
   const children = (CLASS_CACHE.childMap?.[key] || [])
     .filter((c) => c.type_id !== key)
     .map((c) => ({ type_id: c.type_id, type_name: c.type_name }));
-    
+
   if (!children.length) return [];
-  
+
   return [{
     key: "subtype",
     name: "子分类",
@@ -259,10 +297,10 @@ async function enrichVideosWithDetails(rawList, mainTypeId = "") {
   });
 
   // 【核心过滤】如果我们在电影分类里，干掉明显的剧集
-  const isMovieContext = (text(mainTypeId) === "7" || text(mainTypeId) === "电影");
+  const isMovieContext = getMainTypeName(mainTypeId) === "电影";
   const filteredVideos = videos.filter(v => {
     if (isMovieContext && isTvShowName(v.vod_name, v.type_name)) {
-      return false; 
+      return false;
     }
     return true;
   });
@@ -421,8 +459,7 @@ function isAllSelection(value) {
 }
 
 function inferTypeName(mainTypeId, rawTypeName) {
-  const hit = MAIN_CATEGORIES.find((m) => m.type_id === text(mainTypeId));
-  return hit?.type_name || text(rawTypeName || "");
+  return getMainTypeName(mainTypeId) || text(rawTypeName || "");
 }
 
 function buildScrapeKeyword(item) { return text(item.vod_name); }
@@ -444,13 +481,12 @@ function buildDanmakuFileName(scrapeData, mapping, fallbackTitle, fallbackEpName
 // 核心修复 3：请求时动态拼装真实的子分类ID列表
 async function fetchMainAllByChildren(mainTypeId, page) {
   const childTypeIds = getChildTypeIds(mainTypeId);
-  
+
   // 如果没有子分类，直接查询父分类
   if (!childTypeIds.length) {
     const direct = await fetchApi({ ac: "list", t: text(mainTypeId), pg: page });
     const rawList = (Array.isArray(direct.list) ? direct.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
-    // 【注意】这里传入 mainTypeId 上下文，用于过滤错误的剧集
-    const list = await enrichVideosWithDetails(rawList, mainTypeId); 
+    const list = await enrichVideosWithDetails(rawList, mainTypeId);
     return { list, page: Number(direct.page || page || 1), pagecount: Number(direct.pagecount || page || 1), total: Number(direct.total || list.length || 0), limit: Number(direct.limit || 20) };
   }
 
@@ -458,7 +494,7 @@ async function fetchMainAllByChildren(mainTypeId, page) {
   const results = await Promise.all(childTypeIds.map((tid) => fetchApi({ ac: "list", t: tid, pg: page })));
   const mergedRaw = [];
   let total = 0, pagecount = 0, limit = 20;
-  
+
   results.forEach((data) => {
     const arr = Array.isArray(data.list) ? data.list : [];
     mergedRaw.push(...arr);
@@ -474,7 +510,6 @@ async function fetchMainAllByChildren(mainTypeId, page) {
     return true;
   });
 
-  // 【注意】这里传入 mainTypeId 上下文，用于过滤错误的剧集
   const list = await enrichVideosWithDetails(uniqueRaw, mainTypeId);
   list.sort((a, b) => Number(b.vod_id || 0) - Number(a.vod_id || 0));
   return { list, page, pagecount: pagecount || page, total: total || list.length, limit };
@@ -484,11 +519,11 @@ async function home(params, context) {
   await ensureClassCache(); // 必须先拉取分类缓存
   const data = await fetchApi({ ac: "list", pg: 1 });
   const classes = buildMainClasses();
-  
+
   // 首页的 `全部` 标签，不需要过度过滤
   const rawList = (Array.isArray(data.list) ? data.list : []).filter((it) => !isMainBlocked(it.main_type_id || it.type_id));
-  const list = await enrichVideosWithDetails(rawList, ""); 
-  
+  const list = await enrichVideosWithDetails(rawList, "");
+
   const filters = {};
   classes.forEach((m) => {
     const f = buildFiltersForMain(m.type_id);

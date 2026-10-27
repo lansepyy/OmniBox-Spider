@@ -2,8 +2,8 @@
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, cheerio
-// @version 1.2.5
-// @downloadURL https://gh-proxy.org/https://github.com/lansepyy/OmniBox-Spider/raw/refs/heads/main/影视/采集/4KVM.js
+// @version 1.2.6
+// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/4KVM.js
 
 /**
 * ============================================================================
@@ -36,12 +36,16 @@ const DANMU_API = process.env.DANMU_API || "";
 
 // ========== 超时配置 ==========
 const SCRAPE_TIMEOUT = 5 * 1000;      // 详情页刮削超时
-const SNIFF_TIMEOUT = 10 * 1000;      // 播放页嗅探超时（原来 2.5s 太短，很多页面嗅探需要 5~10s）
+const SNIFF_TIMEOUT = 30 * 1000;      // 播放页嗅探超时（日志显示嗅探需要 10~12 秒）
 const DANMU_TIMEOUT = 2 * 1000;       // 弹幕匹配超时
 
 // ========== 缓存 ==========
 const htmlCache = new Map();
 const HTML_CACHE_TTL = 10 * 60 * 1000;
+
+// 嗅探结果缓存：同一个播放页不重复嗅探
+const sniffCache = new Map();
+const SNIFF_CACHE_TTL = 30 * 60 * 1000;
 
 const axiosInstance = axios.create({
     timeout: 15 * 1000,
@@ -134,20 +138,61 @@ const decodeMeta = (str) => {
 };
 
 /**
+ * 从 HTML/JS 文本中快速提取视频直链
+ * 优先于 sniffVideo，能省 10 秒
+ */
+function extractDirectVideoUrl(html) {
+    if (!html) return null;
+
+    const candidates = [];
+
+    // 常见的 m3u8/mp4 出现在 JSON 字符串或 JS 变量中
+    const urlPattern = /https?:\/\/[^\s"'\\]+?\.(?:m3u8|mp4)(?:\?[^\s"'\\]*)?/gi;
+    const matches = html.match(urlPattern);
+    if (matches) {
+        for (const m of matches) {
+            const clean = m.replace(/\\(u002F|\/)/g, "/").replace(/\\u0026/gi, "&").replace(/\\\//g, "/");
+            if (!candidates.includes(clean)) candidates.push(clean);
+        }
+    }
+
+    if (candidates.length > 0) {
+        // 优先取包含 oss/cdn/video/m3u8 关键字的
+        const preferred = candidates.find(u => /oss|cdn|video|m3u8|hls|stream/i.test(u));
+        const result = preferred || candidates[0];
+        logInfo("HTML直链提取成功", result);
+        return result;
+    }
+
+    return null;
+}
+
+/**
  * 嗅探播放页，兜底提取真实视频地址
+ * 带缓存
  */
 const sniff4kvmPlay = async (playUrl) => {
     if (!playUrl) return null;
+
+    const now = Date.now();
+    const cached = sniffCache.get(playUrl);
+    if (cached && cached.expireAt > now) {
+        logInfo("命中嗅探缓存", playUrl);
+        return cached.result;
+    }
+
     try {
         logInfo("开始嗅探播放页", playUrl);
         const sniffed = await OmniBox.sniffVideo(playUrl);
         if (sniffed && sniffed.url) {
             logInfo("嗅探成功", sniffed.url);
-            return {
+            const result = {
                 urls: [{ name: "嗅探线路", url: sniffed.url }],
                 parse: 0,
                 header: sniffed.header || { ...PLAY_HEADERS, "Referer": playUrl }
             };
+            sniffCache.set(playUrl, { result, expireAt: Date.now() + SNIFF_CACHE_TTL });
+            return result;
         }
         logInfo("嗅探无结果");
     } catch (error) {
@@ -387,7 +432,6 @@ const getSeasonEpisodes = async ($, detailUrl) => {
         }
     }
 
-    // 详情页其他方式检测到的集数（仅单季时参与修正）
     const detailDetected = seasonItems.length === 1 ? getEpisodeCount($, $.html()) : null;
 
     const seasonSources = await Promise.all(seasonItems.map(async (item) => {
@@ -399,7 +443,6 @@ const getSeasonEpisodes = async ($, detailUrl) => {
             const detected = getEpisodeCount($seasonData, html);
             let count = (Number.isFinite(detected) && detected > 0) ? detected : null;
 
-            // 单季时用详情页信息修正
             if (seasonItems.length === 1) {
                 if (Number.isFinite(detailDetected) && detailDetected > 0) {
                     count = count ? Math.max(count, detailDetected) : detailDetected;
@@ -409,12 +452,10 @@ const getSeasonEpisodes = async ($, detailUrl) => {
                 }
             }
 
-            // 检测失败兜底
             if (!count || count <= 0) {
                 count = $seasonData('iframe, video, .player').length ? 24 : 1;
             }
 
-            // 防御性上限，避免异常值拖垮详情页
             count = Math.min(Math.max(count, 1), 2000);
 
             logInfo(`${item.name} 集数: ${count}`);
@@ -1243,29 +1284,37 @@ async function play(params) {
             const html = await getHtml(baseUrl);
             const $ = cheerio.load(html);
 
-            const iframe = $('iframe.metaframe, .dooplay_player iframe, .player iframe').first().attr('src');
-            if (iframe) {
-                const iframeUrl = normalizeUrl(iframe);
-                const parseFlag = ['.m3u8', '.mp4', '.flv'].some(ext =>
-                    iframeUrl.toLowerCase().includes(ext)
-                ) ? 0 : 1;
-
-                logInfo(`Iframe解析: ${iframeUrl}, parse=${parseFlag}`);
-                playResponse.urls = [{ name: "4KVM", url: iframeUrl }];
-                playResponse.parse = parseFlag;
+            // 优先尝试从 HTML/JS 中直接提取 m3u8/mp4
+            const directUrl = extractDirectVideoUrl(html);
+            if (directUrl) {
+                logInfo(`HTML直链提取成功，跳过嗅探: ${directUrl}`);
+                playResponse.urls = [{ name: "4KVM", url: directUrl }];
+                playResponse.parse = 0;
             } else {
-                const videoSrc = normalizeUrl($('video source, video').first().attr('src'));
-                if (videoSrc) {
-                    logInfo(`Video标签解析: ${videoSrc}`);
-                    playResponse.urls = [{ name: "4KVM", url: videoSrc }];
-                    playResponse.parse = 0;
+                const iframe = $('iframe.metaframe, .dooplay_player iframe, .player iframe').first().attr('src');
+                if (iframe) {
+                    const iframeUrl = normalizeUrl(iframe);
+                    const parseFlag = ['.m3u8', '.mp4', '.flv'].some(ext =>
+                        iframeUrl.toLowerCase().includes(ext)
+                    ) ? 0 : 1;
+
+                    logInfo(`Iframe解析: ${iframeUrl}, parse=${parseFlag}`);
+                    playResponse.urls = [{ name: "4KVM", url: iframeUrl }];
+                    playResponse.parse = parseFlag;
                 } else {
-                    logInfo("页面解析未找到 iframe/video");
+                    const videoSrc = normalizeUrl($('video source, video').first().attr('src'));
+                    if (videoSrc) {
+                        logInfo(`Video标签解析: ${videoSrc}`);
+                        playResponse.urls = [{ name: "4KVM", url: videoSrc }];
+                        playResponse.parse = 0;
+                    } else {
+                        logInfo("页面解析未找到 iframe/video，稍后进入嗅探");
+                    }
                 }
             }
         }
 
-        // 非直链时嗅探，带超时
+        // 非直链时嗅探，带缓存和足够长的超时
         const currentUrl = playResponse.urls[0]?.url;
         if (currentUrl && !/\.(m3u8|mp4|flv|avi|mkv|ts)(\?|$)/i.test(currentUrl)) {
             logInfo(`当前地址非直链，开始嗅探: ${currentUrl}`);

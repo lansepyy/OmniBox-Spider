@@ -1,8 +1,8 @@
 // @name TMDB推荐
 // @indexs 1
 // @author lampon (modified for TMDB)
-// @description TMDB 推荐爬虫脚本（修复18+分类过滤）
-// @version 2.4.1
+// @description TMDB 推荐爬虫脚本（修复18+分类，支持日亚成人片）
+// @version 2.5.0
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");
@@ -287,62 +287,109 @@ function buildFilters(isMovie) {
 }
 
 // ============ 18+ 分类专用请求 ============
-// 注意：TMDB 的 include_adult=true 只是“允许出现成人片”，不是“只返回成人片”。
-// 成人片在 popularity.desc 里几乎不会出现在前几页，
-// 所以这里改成从冷门/低票/低收入排序开始扫描多页，只收集 adult === true 的影片。
+// TMDB 实际上收录了大量日本/亚洲成人影片（ABP、IPX、SSIS 等番号），
+// 但它们热度极低，靠 popularity 排序几乎翻不到。
+// 这里使用「上映日期倒序 + 冷门排序 + 番号搜索」三种方式共同召回。
 const ADULT_PAGE_SIZE = 20;
-const ADULT_SCAN_SORTS = [
-  "popularity.asc",    // 成人片热度通常很低，从低到高更容易命中
-  "vote_count.asc",    // 低投票数里也容易混有成人片
-  "revenue.asc",       // 低/无票房数据
+
+const ADULT_DISCOVER_SORTS = [
+  "primary_release_date.desc", // 最新加入/上映的成人片
+  "release_date.desc",
+  "popularity.asc",
+  "vote_count.asc",
 ];
-const ADULT_SCAN_MAX_PAGES_PER_SORT = 8;
+
+// 每种 discover 排序最多扫描的页数
+const ADULT_DISCOVER_MAX_PAGES_PER_SORT = 6;
+
+// 常见日本成人番号前缀，通过搜索接口直接召回
+const ADULT_SEARCH_QUERIES = [
+  "ABP", "IPX", "IPZ", "MIDE", "MIDV", "SNIS", "SSNI",
+  "SSIS", "PPPD", "JUY", "JUL", "KAWD", "CAWD", "DLDSS",
+  "FSDSS", "STARS", "SDMU", "SDDE", "RBD", "SHKD", "JUX",
+  "EYAN", "EBOD", "MEYD", "WANZ", "HND", "MIAE", "PRED",
+  "XVSR", "BF", "IPTD", "SOE", "MIRD", "MIMK", "DASD",
+  "CJOD", "GVG", "NSPS", "MIGD",
+];
+
+// 每个番号搜索最多扫描的页数
+const ADULT_SEARCH_MAX_PAGES = 3;
+
+async function fetchAdultDiscover(filters, page, sort) {
+  const params = {
+    page: String(page),
+    sort_by: sort,
+    include_video: "false",
+  };
+
+  if (filters.genre) {
+    params.with_genres = String(filters.genre);
+  }
+  if (filters.region) {
+    params.with_origin_country = String(filters.region);
+  }
+  if (filters.year) {
+    params.primary_release_year = String(filters.year);
+  }
+
+  return tmdbRequest("/discover/movie", params, true);
+}
+
+async function searchAdultMovies(query, filters, page) {
+  const params = {
+    query,
+    page: String(page),
+    include_adult: "true",
+  };
+
+  if (filters.year) {
+    params.primary_release_year = String(filters.year);
+  }
+
+  return tmdbRequest("/search/movie", params, true);
+}
 
 async function collectAdultMovies(filters, targetCount) {
   const adult = [];
   const seen = new Set();
 
-  for (const sort of ADULT_SCAN_SORTS) {
+  function addIfAdult(items) {
+    for (const item of items || []) {
+      if (
+        item &&
+        item.adult === true &&
+        !seen.has(item.id)
+      ) {
+        seen.add(item.id);
+        adult.push(item);
+
+        if (adult.length >= targetCount) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // 1) discover 多排序扫描
+  for (const sort of ADULT_DISCOVER_SORTS) {
     for (
       let page = 1;
-      page <= ADULT_SCAN_MAX_PAGES_PER_SORT;
+      page <= ADULT_DISCOVER_MAX_PAGES_PER_SORT;
       page++
     ) {
-      const params = {
-        page: String(page),
-        sort_by: sort,
-        include_video: "false",
-      };
-
-      if (filters.genre) {
-        params.with_genres = String(filters.genre);
-      }
-      if (filters.region) {
-        params.with_origin_country = String(filters.region);
-      }
-      if (filters.year) {
-        params.primary_release_year = String(filters.year);
-      }
-
-      const data = await tmdbRequest(
-        "/discover/movie",
-        params,
-        true
+      const data = await fetchAdultDiscover(
+        filters,
+        page,
+        sort
       );
 
-      for (const item of data.results || []) {
-        if (
-          item &&
-          item.adult === true &&
-          !seen.has(item.id)
-        ) {
-          seen.add(item.id);
-          adult.push(item);
-
-          if (adult.length >= targetCount) {
-            return adult;
-          }
-        }
+      if (addIfAdult(data.results)) {
+        await OmniBox.log(
+          "info",
+          `18+ 已收集 ${adult.length} 条`
+        );
+        return adult;
       }
 
       if (page >= (data.total_pages || 1)) {
@@ -350,6 +397,47 @@ async function collectAdultMovies(filters, targetCount) {
       }
     }
   }
+
+  // 2) 番号搜索召回（日本/亚洲成人片）
+  for (const query of ADULT_SEARCH_QUERIES) {
+    for (
+      let page = 1;
+      page <= ADULT_SEARCH_MAX_PAGES;
+      page++
+    ) {
+      let data;
+      try {
+        data = await searchAdultMovies(
+          query,
+          filters,
+          page
+        );
+      } catch (e) {
+        await OmniBox.log(
+          "warn",
+          `18+ 搜索 ${query} 失败: ${e.message}`
+        );
+        break;
+      }
+
+      if (addIfAdult(data.results)) {
+        await OmniBox.log(
+          "info",
+          `18+ 已收集 ${adult.length} 条`
+        );
+        return adult;
+      }
+
+      if (page >= (data.total_pages || 1)) {
+        break;
+      }
+    }
+  }
+
+  await OmniBox.log(
+    "info",
+    `18+ 扫描结束，共收集 ${adult.length} 条`
+  );
 
   return adult;
 }

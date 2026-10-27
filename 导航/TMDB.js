@@ -112,7 +112,7 @@ function toVod(item, opts) {
     .join(" · ");
 
   return {
-    vod_id: item.id,
+    vod_id: String(item.id),          // ← 关键修复：强制字符串
     link: buildTmdbLink(item.id, isMovie ? "movie" : "tv"),
     vod_name: title || "",
     search: true,

@@ -1,8 +1,8 @@
 // @name TMDB推荐
 // @indexs 1
 // @author lampon (modified for TMDB)
-// @description TMDB 推荐爬虫脚本（修复18+分类，支持日亚成人片）
-// @version 2.5.0
+// @description TMDB 推荐爬虫脚本（修复18+分类，支持日韩港台三级子分类）
+// @version 2.6.0
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");
@@ -286,10 +286,17 @@ function buildFilters(isMovie) {
   ];
 }
 
+// 18+ 子分类地区已经固定，所以筛选中去掉“地区”
+function buildAdultFilters() {
+  return buildFilters(true).filter(
+    (f) => f.key !== "region"
+  );
+}
+
 // ============ 18+ 分类专用请求 ============
 // TMDB 实际上收录了大量日本/亚洲成人影片（ABP、IPX、SSIS 等番号），
 // 但它们热度极低，靠 popularity 排序几乎翻不到。
-// 这里使用「上映日期倒序 + 冷门排序 + 番号搜索」三种方式共同召回。
+// 这里使用「上映日期倒序 + 冷门排序 + 番号搜索」共同召回。
 const ADULT_PAGE_SIZE = 20;
 
 const ADULT_DISCOVER_SORTS = [
@@ -314,6 +321,45 @@ const ADULT_SEARCH_QUERIES = [
 
 // 每个番号搜索最多扫描的页数
 const ADULT_SEARCH_MAX_PAGES = 3;
+
+// 三级片额外搜索词
+const ADULT_CAT3_SEARCH_QUERIES = [
+  "Category III",
+  "三级",
+];
+
+// 18+ 子分类对应的强制地区
+const ADULT_REGION_MAP = {
+  adult_jp: "JP",
+  adult_kr: "KR",
+  adult_hk: "HK",
+  adult_tw: "TW",
+  adult_cat3: "HK",
+};
+
+function matchesRegion(item, region) {
+  if (!region) return true;
+
+  const countries = item.origin_country || [];
+  if (countries.length > 0) {
+    return countries.includes(region);
+  }
+
+  const langMap = {
+    JP: ["ja"],
+    KR: ["ko"],
+    HK: ["cn", "zh"],
+    TW: ["zh"],
+  };
+
+  const langs = langMap[region] || [];
+  if (langs.length && item.original_language) {
+    return langs.includes(item.original_language);
+  }
+
+  // 无法判断时保留，避免 discover 结果被误删
+  return true;
+}
 
 async function fetchAdultDiscover(filters, page, sort) {
   const params = {
@@ -349,7 +395,17 @@ async function searchAdultMovies(query, filters, page) {
   return tmdbRequest("/search/movie", params, true);
 }
 
-async function collectAdultMovies(filters, targetCount) {
+async function collectAdultMovies(
+  filters,
+  targetCount,
+  options = {}
+) {
+  const effectiveFilters = {
+    ...filters,
+    region: options.region || filters.region,
+  };
+
+  const region = effectiveFilters.region;
   const adult = [];
   const seen = new Set();
 
@@ -358,7 +414,8 @@ async function collectAdultMovies(filters, targetCount) {
       if (
         item &&
         item.adult === true &&
-        !seen.has(item.id)
+        !seen.has(item.id) &&
+        matchesRegion(item, region)
       ) {
         seen.add(item.id);
         adult.push(item);
@@ -379,7 +436,7 @@ async function collectAdultMovies(filters, targetCount) {
       page++
     ) {
       const data = await fetchAdultDiscover(
-        filters,
+        effectiveFilters,
         page,
         sort
       );
@@ -398,8 +455,16 @@ async function collectAdultMovies(filters, targetCount) {
     }
   }
 
-  // 2) 番号搜索召回（日本/亚洲成人片）
-  for (const query of ADULT_SEARCH_QUERIES) {
+  // 2) 番号搜索召回（日本成人片）
+  const searchQueries = [];
+
+  if (!region || region === "JP") {
+    searchQueries.push(...ADULT_SEARCH_QUERIES);
+  }
+
+  searchQueries.push(...(options.searchQueries || []));
+
+  for (const query of searchQueries) {
     for (
       let page = 1;
       page <= ADULT_SEARCH_MAX_PAGES;
@@ -409,7 +474,7 @@ async function collectAdultMovies(filters, targetCount) {
       try {
         data = await searchAdultMovies(
           query,
-          filters,
+          effectiveFilters,
           page
         );
       } catch (e) {
@@ -442,14 +507,15 @@ async function collectAdultMovies(filters, targetCount) {
   return adult;
 }
 
-async function fetchAdultCategory(page, filters) {
+async function fetchAdultCategory(page, filters, options = {}) {
   const start = (page - 1) * ADULT_PAGE_SIZE;
   const end = page * ADULT_PAGE_SIZE;
 
   // 多取一条，用于判断是否还有下一页
   const adultResults = await collectAdultMovies(
     filters,
-    end + 1
+    end + 1,
+    options
   );
 
   const pageItems = adultResults.slice(start, end);
@@ -473,10 +539,14 @@ async function home(params, context) {
   ];
 
   if (ENABLE_ADULT) {
-    classes.push({
-      type_id: "adult_movie",
-      type_name: "18+ 电影",
-    });
+    classes.push(
+      { type_id: "adult_movie", type_name: "18+ 全部" },
+      { type_id: "adult_jp", type_name: "18+ 日本" },
+      { type_id: "adult_kr", type_name: "18+ 韩国" },
+      { type_id: "adult_hk", type_name: "18+ 香港" },
+      { type_id: "adult_tw", type_name: "18+ 台湾" },
+      { type_id: "adult_cat3", type_name: "18+ 三级" }
+    );
   }
 
   classes.push(
@@ -561,6 +631,11 @@ async function home(params, context) {
 
   if (ENABLE_ADULT) {
     filters.adult_movie = buildFilters(true);
+    filters.adult_jp = buildAdultFilters();
+    filters.adult_kr = buildAdultFilters();
+    filters.adult_hk = buildAdultFilters();
+    filters.adult_tw = buildAdultFilters();
+    filters.adult_cat3 = buildAdultFilters();
   }
 
   return {
@@ -586,14 +661,19 @@ async function category(params, context) {
     movie_filter: "电影筛选",
     tv_filter: "剧集筛选",
     show_filter: "综艺筛选",
-    adult_movie: "18+ 电影",
+    adult_movie: "18+ 全部",
+    adult_jp: "18+ 日本",
+    adult_kr: "18+ 韩国",
+    adult_hk: "18+ 香港",
+    adult_tw: "18+ 台湾",
+    adult_cat3: "18+ 三级",
   };
 
   const typeName =
     categoryNames[categoryId] || "未知";
 
   const isAdultCategory =
-    categoryId === "adult_movie";
+    categoryId.startsWith("adult");
 
   const isMovie =
     categoryId.startsWith("movie") ||
@@ -632,9 +712,21 @@ async function category(params, context) {
   try {
     if (isAdultCategory) {
       // 18+ 分类：只保留 adult === true 的影片
+      const adultOptions = {};
+
+      if (ADULT_REGION_MAP[categoryId]) {
+        adultOptions.region = ADULT_REGION_MAP[categoryId];
+      }
+
+      if (categoryId === "adult_cat3") {
+        adultOptions.searchQueries =
+          ADULT_CAT3_SEARCH_QUERIES;
+      }
+
       data = await fetchAdultCategory(
         page,
-        filters
+        filters,
+        adultOptions
       );
     } else if (!isFilter && !hasFilter) {
       // 普通分类：热门电影或剧集

@@ -2,7 +2,7 @@
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, cheerio
-// @version 1.2.3
+// @version 1.2.4
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/4KVM.js
 
 /**
@@ -35,7 +35,7 @@ const config = {
 const DANMU_API = process.env.DANMU_API || "";
 
 const axiosInstance = axios.create({
-    timeout: 60 * 1000,
+    timeout: 15 * 1000,
     httpsAgent: new https.Agent({ keepAlive: true, rejectUnauthorized: false }),
     httpAgent: new http.Agent({ keepAlive: true })
 });
@@ -45,6 +45,54 @@ const PLAY_HEADERS = {
     "Referer": "https://www.4kvm.org/",
     "Origin": "https://www.4kvm.org"
 };
+
+// ========== 缓存 ==========
+const htmlCache = new Map();
+const HTML_CACHE_TTL = 10 * 60 * 1000;
+
+async function getHtml(url, ttl = HTML_CACHE_TTL) {
+    const now = Date.now();
+    const hit = htmlCache.get(url);
+    if (hit && hit.expireAt > now) {
+        logInfo(`命中HTML缓存: ${url}`);
+        return hit.html;
+    }
+
+    const response = await axiosInstance.get(url, { headers: config.headers });
+    const html = response.data;
+    htmlCache.set(url, { html, expireAt: now + ttl });
+    return html;
+}
+
+// ========== 通用超时工具 ==========
+function withTimeout(promise, ms, fallback = null) {
+    return new Promise((resolve) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (!settled) {
+                settled = true;
+                resolve(fallback);
+            }
+        }, ms);
+
+        Promise.resolve(promise)
+            .then((value) => {
+                if (!settled) {
+                    settled = true;
+                    clearTimeout(timer);
+                    resolve(value);
+                }
+            })
+            .catch(() => {
+                if (!settled) {
+                    settled = true;
+                    clearTimeout(timer);
+                    resolve(fallback);
+                }
+                // 超时后的晚到错误直接吞掉，避免 unhandled rejection
+            });
+    });
+}
 
 /**
 * 日志工具函数
@@ -240,6 +288,7 @@ const getSearchVideoList = ($) => {
 
 /**
 * 智能检测集数
+* 检测不到时返回 null，由调用方兜底
 */
 const getEpisodeCount = ($seasonData, pageHtml) => {
     try {
@@ -296,76 +345,85 @@ const getEpisodeCount = ($seasonData, pageHtml) => {
         }
         logInfo("集数检测方法3未命中: 文本模式无匹配");
 
-        // 默认值
-        const fallbackCount = $seasonData('iframe, video, .player').length ? 24 : 1;
-        logInfo("集数检测走默认值", { count: fallbackCount, hasPlayer: $seasonData('iframe, video, .player').length > 0 });
-        return fallbackCount;
+        return null;
     } catch (error) {
         logError("检测集数失败", error);
-        return 1;
+        return null;
     }
 };
 
 /**
-* 获取季度集数信息
+* 获取季度集数信息（并发抓取）
 */
 const getSeasonEpisodes = async ($, detailUrl) => {
-    const seasonSources = [];
+    const seasonItems = [];
 
-    try {
-        const seasonLinks = $('.seasons-list a, .season-item a, .se-c a, .se-a a, .seasons a');
+    $('.seasons-list a, .season-item a, .se-c a, .se-a a, .seasons a').each((_, el) => {
+        const $season = $(el);
+        const title = $season.text().trim() || '第1季';
+        const url = normalizeUrl($season.attr('href'));
+        if (url) seasonItems.push({ name: title, url });
+    });
 
-        let episodeCount = 500;
-        const customFields = $(".custom_fields");
-        if (customFields.length) {
-            const spanText = customFields.last().find("span").last().text().trim();
-            const parsed = parseInt(spanText, 10);
-            if (!Number.isNaN(parsed) && parsed > 0) {
-                episodeCount = parsed;
-                OmniBox.log("info", `集数检测命中方法0: .custom_fields span ${episodeCount}`)
-            }
+    if (seasonItems.length === 0) return [];
+
+    // 详情页 custom_fields 集数提示
+    let detailCount = 0;
+    const customFields = $(".custom_fields");
+    if (customFields.length) {
+        const spanText = customFields.last().find("span").last().text().trim();
+        const parsed = parseInt(spanText, 10);
+        if (!Number.isNaN(parsed) && parsed > 0) {
+            detailCount = parsed;
+            OmniBox.log("info", `集数检测命中方法0: .custom_fields span ${parsed}`);
         }
-
-        for (let i = 0; i < seasonLinks.length; i++) {
-            const $season = seasonLinks.eq(i);
-            const seasonTitle = $season.text().trim() || '第1季';
-            const seasonUrl = normalizeUrl($season.attr('href'));
-
-            if (!seasonUrl) continue;
-
-            try {
-                logInfo(`获取季度信息: ${seasonTitle}，seasonUrl：${seasonUrl}`);
-                const seasonResp = await axiosInstance.get(seasonUrl, { headers: config.headers });
-                const $seasonData = cheerio.load(seasonResp.data);
-                if (seasonLinks.length > 1) {
-                    episodeCount = getEpisodeCount($seasonData, seasonResp.data);
-                }
-                const limitedCount = Math.min(Math.max(episodeCount, 1), episodeCount);
-
-                logInfo(`${seasonTitle} 集数: ${limitedCount}`);
-
-                const episodes = [];
-                if (limitedCount === 1) {
-                    episodes.push({ name: '第1集', url: seasonUrl });
-                } else {
-                    for (let epNum = 1; epNum <= limitedCount; epNum++) {
-                        const episodeTitle = `第${epNum}集`;
-                        const episodeUrl = `${seasonUrl}?ep=${epNum}`;
-                        episodes.push({ name: episodeTitle, url: episodeUrl });
-                    }
-                }
-
-                if (episodes.length > 0) {
-                    seasonSources.push({ name: seasonTitle, episodes });
-                }
-            } catch (error) {
-                logError("获取季度失败", error);
-                seasonSources.push({ name: seasonTitle, episodes: [{ name: '第1集', url: seasonUrl }] });
-            }
-        }
-    } catch (error) {
-        logError("获取季度列表失败", error);
     }
+
+    // 详情页其他方式检测到的集数（仅单季时参与修正）
+    const detailDetected = seasonItems.length === 1 ? getEpisodeCount($, $.html()) : null;
+
+    const seasonSources = await Promise.all(seasonItems.map(async (item) => {
+        try {
+            logInfo(`获取季度信息: ${item.name}，seasonUrl：${item.url}`);
+            const html = await getHtml(item.url);
+            const $seasonData = cheerio.load(html);
+
+            const detected = getEpisodeCount($seasonData, html);
+            let count = (Number.isFinite(detected) && detected > 0) ? detected : null;
+
+            // 单季时用详情页信息修正
+            if (seasonItems.length === 1) {
+                if (Number.isFinite(detailDetected) && detailDetected > 0) {
+                    count = count ? Math.max(count, detailDetected) : detailDetected;
+                }
+                if (detailCount > 0) {
+                    count = count ? Math.max(count, detailCount) : detailCount;
+                }
+            }
+
+            // 检测失败兜底，沿用原逻辑
+            if (!count || count <= 0) {
+                count = $seasonData('iframe, video, .player').length ? 24 : 1;
+            }
+
+            // 防御性上限，避免异常值拖垮详情页
+            count = Math.min(Math.max(count, 1), 2000);
+
+            logInfo(`${item.name} 集数: ${count}`);
+
+            const episodes = [];
+            for (let epNum = 1; epNum <= count; epNum++) {
+                const episodeTitle = `第${epNum}集`;
+                const episodeUrl = `${item.url}?ep=${epNum}`;
+                episodes.push({ name: episodeTitle, url: episodeUrl });
+            }
+
+            return { name: item.name, episodes };
+        } catch (error) {
+            logError("获取季度失败", error);
+            return { name: item.name, episodes: [{ name: '第1集', url: item.url }] };
+        }
+    }));
 
     return seasonSources;
 };
@@ -489,6 +547,7 @@ const extractEpisodePlaySources = ($, vodName, videoId = "") => {
     }
     return sources;
 };
+
 /**
 * 过滤电视剧内容
 */
@@ -776,8 +835,8 @@ async function home(params) {
     logInfo("进入首页");
 
     try {
-        const response = await axiosInstance.get(config.host, { headers: config.headers });
-        const $ = cheerio.load(response.data);
+        const html = await getHtml(config.host);
+        const $ = cheerio.load(html);
 
         const classes = [];
         const seen = new Set();
@@ -830,8 +889,8 @@ async function category(params) {
                 : `${categoryId}?page=${pg}`;
         }
 
-        const response = await axiosInstance.get(url, { headers: config.headers });
-        const $ = cheerio.load(response.data);
+        const html = await getHtml(url);
+        const $ = cheerio.load(html);
 
         let videoList = getVideoList($, '.movie-card');
 
@@ -860,8 +919,8 @@ async function detail(params) {
     logInfo(`请求详情 ID: ${videoId}`);
 
     try {
-        const response = await axiosInstance.get(videoId, { headers: config.headers });
-        const $ = cheerio.load(response.data);
+        const html = await getHtml(videoId);
+        const $ = cheerio.load(html);
 
         const detailMap = {};
         $('.grid .text-gray-500').each((_, el) => {
@@ -940,10 +999,22 @@ async function detail(params) {
             }
         }
 
-        if (scrapeCandidates.length > 0) {
+        // 详情页只刮削前 N 集，避免集数过多时严重阻塞详情返回
+        const SCRAPE_LIMIT = 30;
+        const scrapeCandidatesToProcess = scrapeCandidates.slice(0, SCRAPE_LIMIT);
+
+        if (scrapeCandidatesToProcess.length > 0) {
             try {
-                const scrapingResult = await OmniBox.processScraping(videoIdForScrape, vod.vod_name || "", vod.vod_name || "", scrapeCandidates);
-                OmniBox.log("info", `[4KVM-DEBUG] 刮削处理完成,结果: ${JSON.stringify(scrapingResult || {}).substring(0, 200)}`);
+                await withTimeout(
+                    OmniBox.processScraping(
+                        videoIdForScrape,
+                        vod.vod_name || "",
+                        vod.vod_name || "",
+                        scrapeCandidatesToProcess
+                    ),
+                    3000
+                );
+                OmniBox.log("info", `[4KVM-DEBUG] 刮削处理已提交`);
 
                 const metadata = await OmniBox.getScrapeMetadata(videoIdForScrape);
                 scrapeData = metadata?.scrapeData || null;
@@ -1044,8 +1115,8 @@ async function search(params) {
             searchUrl += `&page=${pg}`;
         }
 
-        const response = await axiosInstance.get(searchUrl, { headers: config.headers });
-        const $ = cheerio.load(response.data);
+        const html = await getHtml(searchUrl);
+        const $ = cheerio.load(html);
 
         const rawResults = getSearchVideoList($);
         const filteredResults = filterSearchResults(rawResults, wd);
@@ -1154,7 +1225,8 @@ async function play(params) {
                     params: {
                         type: dataType || 'movie',
                         source: dataNume
-                    }
+                    },
+                    timeout: 15000
                 });
 
                 if (apiResponse.status === 200 && apiResponse.data.embed_url) {
@@ -1174,8 +1246,8 @@ async function play(params) {
 
         // 如果API调用失败，页面解析回退
         if (playResponse.urls[0].url === playId) {
-            const response = await axiosInstance.get(baseUrl, { headers: config.headers });
-            const $ = cheerio.load(response.data);
+            const html = await getHtml(baseUrl);
+            const $ = cheerio.load(html);
 
             // 查找iframe
             const iframe = $('iframe.metaframe, .dooplay_player iframe, .player iframe').first().attr('src');
@@ -1199,18 +1271,20 @@ async function play(params) {
             }
         }
 
-        if (playResponse.urls[0]?.url && !playResponse.urls[0]?.url.match(/\.(m3u8|mp4|flv|avi|mkv|ts)/i)) {
-            const sniffResult = await sniff4kvmPlay(playResponse.urls[0].url);
+        // 非直链时嗅探，带超时
+        const currentUrl = playResponse.urls[0]?.url;
+        if (currentUrl && !/\.(m3u8|mp4|flv|avi|mkv|ts)(\?|$)/i.test(currentUrl)) {
+            const sniffResult = await withTimeout(sniff4kvmPlay(currentUrl), 2500);
             if (sniffResult) {
                 playResponse = sniffResult;
             }
         }
 
-        OmniBox.log("info", `使用默认播放：${playId}`);
+        OmniBox.log("info", `播放解析完成: ${playId}`);
 
         OmniBox.log("info", `DANMU_API: ${DANMU_API}, params.vodName：${params.vodName}`);
 
-        // 弹幕匹配
+        // 弹幕匹配，带超时
         if (DANMU_API && (vodName || params.vodName)) {
             const finalVodName = vodName || params.vodName;
             const finalEpisodeName = episodeName || params.episodeName || '';
@@ -1219,7 +1293,7 @@ async function play(params) {
             logInfo(`尝试匹配弹幕文件名: ${fileName}`);
 
             if (fileName) {
-                const danmakuList = await matchDanmu(fileName);
+                const danmakuList = await withTimeout(matchDanmu(fileName), 2000, []);
                 if (danmakuList && danmakuList.length > 0) {
                     playResponse.danmaku = danmakuList;
                 }
@@ -1229,7 +1303,7 @@ async function play(params) {
         return playResponse;
     } catch (error) {
         logError("播放解析失败", error);
-        const fallbackSniff = await sniff4kvmPlay(playId);
+        const fallbackSniff = await withTimeout(sniff4kvmPlay(playId), 2500);
         if (fallbackSniff) {
             return fallbackSniff;
         }

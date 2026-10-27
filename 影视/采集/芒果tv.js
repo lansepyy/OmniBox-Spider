@@ -2,7 +2,7 @@
 // @author OpenClaw Bingbu + 梦
 // @description 刮削：支持，弹幕：支持，嗅探：支持，观看记录：支持，广告：菠菜
 // @dependencies: axios
-// @version 1.2.0
+// @version 1.2.1
 // @downloadURL https://gh-proxy.org/https://github.com/lansepyy/OmniBox-Spider/raw/refs/heads/main/影视/采集/芒果tv.js
 
 /**
@@ -11,6 +11,8 @@
  * 站点: https://caiji.mgzyapi.com
  *
  * 更新日志：
+ * - v1.2.1: 新增 短剧、伦理 两大主分类；
+ *           伦理可通过变量 IQIYIZY_SHOW_LUNLI 控制显示/隐藏。
  * - v1.2.0: 主分类固定为 电影/电视剧/动漫，分别对应原站 电影片/连续剧/动漫片；
  *           子分类按原站结构显式定义并按名称动态匹配真实 type_id；
  *           主分类“全部”优先直查主分类，修复电影只返回动作片的问题。
@@ -24,6 +26,14 @@ const runner = require("spider_runner");
 const HOST = "https://caiji.mgzyapi.com";
 const API = `${HOST}/api.php/provide/vod`;
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
+
+// ============================================================================
+// 伦理分类开关：
+// true  = 显示伦理
+// false = 隐藏伦理
+// 直接改下面这个 true 或 false 即可
+// ============================================================================
+const SHOW_LUNLI = true;
 
 // 主分类定义：key 为前端显示名，siteNames 为原站顶级分类名
 const MAIN_DEFS = [
@@ -52,10 +62,28 @@ const MAIN_DEFS = [
     subNames: [
       "国产动漫", "日韩动漫", "欧美动漫", "港台动漫", "海外动漫"
     ]
+  },
+  {
+    key: "短剧",
+    siteNames: ["短剧", "短剧片"],
+    fallbackIds: [],
+    subNames: [
+      "女恋总裁", "都市脑洞", "闪婚离婚", "现代言情", "反转爽文",
+      "古装仙侠", "重生民国", "穿越年代", "女频恋爱", "漫剧",
+      "擦边短剧", "爽文短剧", "反转爽剧", "年代穿越", "脑洞悬疑", "现代都市"
+    ]
+  },
+  {
+    key: "伦理",
+    siteNames: ["伦理", "伦理片"],
+    fallbackIds: ["39"],
+    subNames: [
+      "港台三级", "韩国伦理", "西方伦理", "日本伦理", "两性课堂", "写真热舞"
+    ]
   }
 ];
 
-const DEFAULT_BLOCKED_MAIN = ["39"];
+const DEFAULT_BLOCKED_MAIN = [];
 
 const http = axios.create({
   timeout: 20000,
@@ -205,6 +233,8 @@ function classifyMainTypeName(typeName) {
   const n = text(typeName);
   if (!n) return "";
 
+  if (/短剧/.test(n)) return "短剧";
+  if (/伦理/.test(n)) return "伦理";
   if (/电影片|电影/.test(n)) return "电影";
   if (/连续剧|电视剧/.test(n)) return "电视剧";
   if (/动漫片|动漫/.test(n)) return "动漫";
@@ -230,7 +260,7 @@ function getMainTypeName(typeId) {
   }
 
   for (const def of MAIN_DEFS) {
-    if (def.fallbackIds.includes(id)) return def.key;
+    if ((def.fallbackIds || []).includes(id)) return def.key;
   }
   return "";
 }
@@ -252,13 +282,35 @@ function resolveMainTypeId(typeId, fallbackMain = "") {
   }
 
   for (const def of MAIN_DEFS) {
-    if (def.fallbackIds.includes(t)) return t;
+    if ((def.fallbackIds || []).includes(t)) return t;
   }
   return text(fallbackMain);
 }
 
+// 伦理分类相关的所有 type_id（用于隐藏时过滤）
+function getLunliTypeIds() {
+  const def = MAIN_DEFS.find((d) => d.key === "伦理");
+  const ids = new Set();
+  if (!def) return ids;
+
+  (def.fallbackIds || []).forEach((id) => ids.add(id));
+
+  const main = findMainClass(def);
+  if (main?.type_id) ids.add(main.type_id);
+
+  if (main) {
+    resolveSubClasses(main.type_id, def).forEach((s) => {
+      if (/^\d+$/.test(text(s.type_id))) ids.add(text(s.type_id));
+    });
+  }
+  return ids;
+}
+
 function isMainBlocked(mainTypeId) {
-  return getBlockedMainSet().has(text(mainTypeId));
+  const id = text(mainTypeId);
+  if (getBlockedMainSet().has(id)) return true;
+  if (!SHOW_LUNLI && getLunliTypeIds().has(id)) return true;
+  return false;
 }
 
 // 识别并剔除混入电影的剧集
@@ -303,14 +355,23 @@ function classifyVodMainType(item) {
   return "";
 }
 
-// 主分类列表：固定 电影 / 电视剧 / 动漫
+// 主分类列表：固定 电影 / 电视剧 / 动漫 / 短剧 / 伦理（伦理可隐藏）
 function buildMainClasses() {
-  return MAIN_DEFS.map((def) => {
-    const hit = findMainClass(def);
-    const type_id = hit ? hit.type_id : def.fallbackIds[0];
-    safeLog("info", `[buildMainClasses] ${def.key} -> type_id=${type_id} (site=${hit ? hit.type_name : "fallback"})`);
-    return { type_id, type_name: def.key };
-  });
+  return MAIN_DEFS
+    .filter((def) => !(def.key === "伦理" && !SHOW_LUNLI))
+    .map((def) => {
+      const hit = findMainClass(def);
+      const type_id = hit ? hit.type_id : ((def.fallbackIds || [])[0] || "");
+
+      if (!type_id) {
+        safeLog("warn", `[buildMainClasses] ${def.key} 未找到分类ID，已跳过`);
+        return null;
+      }
+
+      safeLog("info", `[buildMainClasses] ${def.key} -> type_id=${type_id} (site=${hit ? hit.type_name : "fallback"})`);
+      return { type_id, type_name: def.key };
+    })
+    .filter(Boolean);
 }
 
 // 解析某个主分类下的子分类列表
@@ -617,7 +678,7 @@ async function fetchGeneralFiltered(mainTypeId, mainTypeName, page) {
 async function fetchMainAllByChildren(mainTypeId, page, mainDef) {
   const name = mainDef?.key || getMainTypeName(mainTypeId) || "";
 
-  // 1. 优先直查主分类，保证“电影片/连续剧/动漫片”整体数据完整
+  // 1. 优先直查主分类，保证整体数据完整
   const direct = await fetchDirectByType(mainTypeId, mainTypeId, page);
   if (direct.list.length > 0) return direct;
 
